@@ -1,3 +1,4 @@
+use ahash::AHasher;
 use clap::{Parser, Subcommand};
 use colored::Colorize;
 use ignore::WalkBuilder;
@@ -151,9 +152,15 @@ struct FileEntry {
     line_count: usize,
     headings: Vec<Heading>,
     keywords: Vec<String>,
-    body_keywords: Vec<String>,  // NEW: keywords from full text
+    body_keywords: Vec<String>,  // keywords from full text
     links: Vec<Link>,
-    simhash: u64,  // NEW: content fingerprint
+    simhash: u64,  // content fingerprint
+    #[serde(default)]
+    term_frequencies: HashMap<String, usize>,  // NEW: term counts for BM25
+    #[serde(default)]
+    doc_length: usize,  // NEW: total terms for BM25
+    #[serde(default)]
+    minhash: Vec<u64>,  // NEW: MinHash signature for LSH
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -182,7 +189,11 @@ struct ReverseEntry {
 struct ForwardIndex {
     files: HashMap<String, FileEntry>,
     indexed_at: String,
-    version: u32,  // NEW: index version for compatibility
+    version: u32,  // index version for compatibility
+    #[serde(default)]
+    avg_doc_length: f64,  // NEW: average document length for BM25
+    #[serde(default)]
+    idf_map: HashMap<String, f64>,  // NEW: IDF scores for BM25
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -261,7 +272,9 @@ fn cmd_build(
     let mut forward_index = ForwardIndex {
         files: HashMap::new(),
         indexed_at: chrono_now(),
-        version: 2,  // Version 2 includes body_keywords and simhash
+        version: 3,  // Version 3 includes BM25 (term_frequencies, idf_map) and MinHash
+        avg_doc_length: 0.0,
+        idf_map: HashMap::new(),
     };
 
     let mut reverse_index = ReverseIndex {
@@ -361,6 +374,33 @@ fn cmd_build(
         }
     }
 
+    // Compute BM25 statistics (IDF and average document length)
+    let total_docs = forward_index.files.len() as f64;
+    let mut doc_frequencies: HashMap<String, usize> = HashMap::new();
+    let mut total_length = 0;
+
+    // Compute document frequencies
+    for entry in forward_index.files.values() {
+        total_length += entry.doc_length;
+        for term in entry.term_frequencies.keys() {
+            *doc_frequencies.entry(term.clone()).or_insert(0) += 1;
+        }
+    }
+
+    // Compute IDF scores
+    let mut idf_map: HashMap<String, f64> = HashMap::new();
+    for (term, df) in doc_frequencies {
+        let idf = ((total_docs - df as f64 + 0.5) / (df as f64 + 0.5)).ln();
+        idf_map.insert(term, idf);
+    }
+
+    forward_index.avg_doc_length = if total_docs > 0.0 {
+        total_length as f64 / total_docs
+    } else {
+        0.0
+    };
+    forward_index.idf_map = idf_map;
+
     // Create output directory
     fs::create_dir_all(output)?;
 
@@ -457,7 +497,31 @@ fn index_file(path: &Path) -> Result<FileEntry, Box<dyn std::error::Error>> {
         body_keywords.remove(kw);
     }
 
-    // NEW: Compute simhash fingerprint
+    // NEW: Compute term frequencies for BM25
+    let mut term_frequencies: HashMap<String, usize> = HashMap::new();
+    let mut total_terms = 0;
+
+    for line in &lines {
+        // Skip code blocks
+        if line.starts_with("```") || line.starts_with("    ") {
+            continue;
+        }
+        let words = extract_keywords(line);
+        for word in words {
+            let stemmed = stem_word(&word);
+            *term_frequencies.entry(stemmed).or_insert(0) += 1;
+            total_terms += 1;
+        }
+    }
+
+    // NEW: Compute MinHash signature
+    let all_keywords: Vec<String> = keywords.iter()
+        .chain(body_keywords.iter())
+        .cloned()
+        .collect();
+    let minhash = compute_minhash(&all_keywords, 128);
+
+    // Compute simhash fingerprint
     let simhash = compute_simhash(&content);
 
     Ok(FileEntry {
@@ -469,6 +533,9 @@ fn index_file(path: &Path) -> Result<FileEntry, Box<dyn std::error::Error>> {
         body_keywords: body_keywords.into_iter().collect(),
         links,
         simhash,
+        term_frequencies,
+        doc_length: total_terms,
+        minhash,
     })
 }
 
@@ -565,6 +632,101 @@ fn simhash_similarity(a: u64, b: u64) -> f64 {
     1.0 - (distance as f64 / 64.0)
 }
 
+/// Compute MinHash signature for a set of keywords
+fn compute_minhash(keywords: &[String], num_hashes: usize) -> Vec<u64> {
+    let mut hashes = vec![u64::MAX; num_hashes];
+
+    for keyword in keywords {
+        for i in 0..num_hashes {
+            let mut hasher = AHasher::default();
+            keyword.hash(&mut hasher);
+            i.hash(&mut hasher); // Use index as seed
+            let h = hasher.finish();
+
+            hashes[i] = hashes[i].min(h);
+        }
+    }
+
+    hashes
+}
+
+/// Compute MinHash similarity (Jaccard estimate)
+fn minhash_similarity(a: &[u64], b: &[u64]) -> f64 {
+    if a.len() != b.len() || a.is_empty() {
+        return 0.0;
+    }
+
+    let matches = a.iter()
+        .zip(b.iter())
+        .filter(|(x, y)| x == y)
+        .count();
+
+    matches as f64 / a.len() as f64
+}
+
+/// Compute BM25 score for a document given query terms
+fn bm25_score(
+    query_terms: &[String],
+    doc: &FileEntry,
+    avg_doc_length: f64,
+    idf_map: &HashMap<String, f64>,
+) -> f64 {
+    const K1: f64 = 1.5;
+    const B: f64 = 0.75;
+
+    if doc.doc_length == 0 {
+        return 0.0;
+    }
+
+    let mut score = 0.0;
+    let norm_factor = 1.0 - B + B * (doc.doc_length as f64 / avg_doc_length);
+
+    for term in query_terms {
+        let stemmed = stem_word(&term.to_lowercase());
+        let tf = *doc.term_frequencies.get(&stemmed).unwrap_or(&0) as f64;
+        let idf = idf_map.get(&stemmed).unwrap_or(&0.0);
+
+        if tf > 0.0 {
+            score += idf * (tf * (K1 + 1.0)) / (tf + K1 * norm_factor);
+        }
+    }
+
+    score
+}
+
+/// Build LSH buckets for fast duplicate detection
+fn lsh_buckets(
+    files: &HashMap<String, FileEntry>,
+    bands: usize,
+) -> HashMap<u64, Vec<String>> {
+    let rows_per_band = 128 / bands; // Assuming 128 hashes
+    let mut buckets: HashMap<u64, Vec<String>> = HashMap::new();
+
+    for (path, entry) in files {
+        if entry.minhash.is_empty() {
+            continue; // Skip files without MinHash
+        }
+
+        for band in 0..bands {
+            let start = band * rows_per_band;
+            let end = (start + rows_per_band).min(entry.minhash.len());
+
+            // Hash this band's values
+            let mut hasher = AHasher::default();
+            for val in &entry.minhash[start..end] {
+                val.hash(&mut hasher);
+            }
+            let band_hash = hasher.finish();
+
+            buckets.entry(band_hash)
+                .or_insert_with(Vec::new)
+                .push(path.clone());
+        }
+    }
+
+    buckets
+}
+
 fn cmd_query(
     terms: &[String],
     limit: usize,
@@ -572,31 +734,23 @@ fn cmd_query(
     json: bool,
     index_dir: &Path,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let reverse_index = load_reverse_index(index_dir)?;
+    let _reverse_index = load_reverse_index(index_dir)?;
     let forward_index = load_forward_index(index_dir)?;
 
-    // Find files matching all terms (with stemming)
-    let mut file_scores: HashMap<String, usize> = HashMap::new();
+    // Compute BM25 scores for all documents
+    let mut file_scores: Vec<(String, f64)> = forward_index.files.iter()
+        .map(|(path, entry)| {
+            let score = bm25_score(terms, entry, forward_index.avg_doc_length, &forward_index.idf_map);
+            (path.clone(), score)
+        })
+        .filter(|(_, score)| *score > 0.0)
+        .collect();
 
-    for term in terms {
-        let stemmed = stem_word(&term.to_lowercase());
-        if let Some(entries) = reverse_index.keywords.get(&stemmed) {
-            for entry in entries {
-                *file_scores.entry(entry.file.clone()).or_insert(0) += 1;
-            }
-        }
-        // Also try original term
-        if let Some(entries) = reverse_index.keywords.get(&term.to_lowercase()) {
-            for entry in entries {
-                *file_scores.entry(entry.file.clone()).or_insert(0) += 1;
-            }
-        }
-    }
+    // Sort by BM25 score (descending)
+    file_scores.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+    file_scores.truncate(limit);
 
-    // Sort by score
-    let mut results: Vec<_> = file_scores.into_iter().collect();
-    results.sort_by(|a, b| b.1.cmp(&a.1));
-    results.truncate(limit);
+    let results = file_scores;
 
     if json {
         println!("{}", serde_json::to_string_pretty(&results)?);
@@ -617,7 +771,7 @@ fn cmd_query(
         if files_only {
             println!("{}", file);
         } else {
-            println!("{} (score: {})", file.cyan(), score);
+            println!("{} (score: {:.2})", file.cyan(), score);
 
             // Show matching headings
             if let Some(entry) = forward_index.files.get(&file) {
@@ -745,16 +899,33 @@ fn cmd_dupes(
     index_dir: &Path,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let forward_index = load_forward_index(index_dir)?;
+    let start = Instant::now();
 
-    let files: Vec<_> = forward_index.files.iter().collect();
-    let mut duplicates: Vec<(String, String, f64, f64, f64)> = Vec::new();  // (path1, path2, jaccard, simhash, combined)
+    // Build LSH buckets for fast duplicate detection
+    let buckets = lsh_buckets(&forward_index.files, 16); // 16 bands x 8 rows = 128 hashes
+    let mut candidates: HashSet<(String, String)> = HashSet::new();
 
-    // Compare all pairs
-    for i in 0..files.len() {
-        for j in (i + 1)..files.len() {
-            let (path1, entry1) = files[i];
-            let (path2, entry2) = files[j];
+    // Collect candidate pairs from buckets
+    for paths in buckets.values() {
+        if paths.len() > 1 {
+            for i in 0..paths.len() {
+                for j in (i + 1)..paths.len() {
+                    let (p1, p2) = if paths[i] < paths[j] {
+                        (paths[i].clone(), paths[j].clone())
+                    } else {
+                        (paths[j].clone(), paths[i].clone())
+                    };
+                    candidates.insert((p1, p2));
+                }
+            }
+        }
+    }
 
+    let mut duplicates: Vec<(String, String, f64, f64, f64, f64)> = Vec::new();  // (path1, path2, jaccard, simhash, minhash, combined)
+
+    // Compare candidate pairs
+    for (path1, path2) in &candidates {
+        if let (Some(entry1), Some(entry2)) = (forward_index.files.get(path1), forward_index.files.get(path2)) {
             let kw1: HashSet<String> = entry1.keywords.iter()
                 .chain(entry1.body_keywords.iter())
                 .map(|k| k.to_lowercase())
@@ -766,24 +937,28 @@ fn cmd_dupes(
 
             let jaccard = jaccard_similarity(&kw1, &kw2);
             let simhash_sim = simhash_similarity(entry1.simhash, entry2.simhash);
-            let combined = jaccard * 0.6 + simhash_sim * 0.4;
+            let minhash_sim = minhash_similarity(&entry1.minhash, &entry2.minhash);
+            let combined = jaccard * 0.4 + simhash_sim * 0.3 + minhash_sim * 0.3;
 
             if combined >= threshold {
-                duplicates.push((path1.clone(), path2.clone(), jaccard, simhash_sim, combined));
+                duplicates.push((path1.clone(), path2.clone(), jaccard, simhash_sim, minhash_sim, combined));
             }
         }
     }
 
+    let elapsed = start.elapsed();
+
     // Sort by combined similarity
-    duplicates.sort_by(|a, b| b.4.partial_cmp(&a.4).unwrap());
+    duplicates.sort_by(|a, b| b.5.partial_cmp(&a.5).unwrap_or(std::cmp::Ordering::Equal));
 
     if json {
         let output: Vec<_> = duplicates.iter()
-            .map(|(p1, p2, j, s, c)| serde_json::json!({
+            .map(|(p1, p2, j, s, m, c)| serde_json::json!({
                 "file1": p1,
                 "file2": p2,
                 "jaccard": j,
                 "simhash": s,
+                "minhash": m,
                 "combined": c
             }))
             .collect();
@@ -793,19 +968,29 @@ fn cmd_dupes(
 
     if duplicates.is_empty() {
         println!("{}", "No duplicates found above threshold.".green());
+        eprintln!("LSH duplicate detection: {:?} ({} candidate pairs from {} buckets)",
+            elapsed,
+            candidates.len(),
+            buckets.len()
+        );
         return Ok(());
     }
 
-    println!("{} duplicate pairs found (threshold: {}%)\n",
+    println!("{} duplicate pairs found (threshold: {}%)",
         duplicates.len().to_string().yellow().bold(),
         (threshold * 100.0) as u32
+    );
+    eprintln!("LSH duplicate detection: {:?} ({} candidates from {} buckets)\n",
+        elapsed,
+        candidates.len(),
+        buckets.len()
     );
 
     if group {
         // Group duplicates
         let mut groups: HashMap<String, Vec<(String, f64)>> = HashMap::new();
 
-        for (path1, path2, _, _, combined) in &duplicates {
+        for (path1, path2, _, _, _, combined) in &duplicates {
             let group = groups.entry(path1.clone()).or_insert_with(Vec::new);
             if !group.iter().any(|(p, _)| p == path2) {
                 group.push((path2.clone(), *combined));
@@ -820,12 +1005,13 @@ fn cmd_dupes(
             println!();
         }
     } else {
-        for (path1, path2, jaccard, simhash_sim, combined) in duplicates.iter().take(50) {
+        for (path1, path2, jaccard, simhash_sim, minhash_sim, combined) in duplicates.iter().take(50) {
             let comb_pct = (combined * 100.0) as u32;
-            println!("{}% [J:{}% S:{}%] {} <-> {}",
+            println!("{}% [J:{}% S:{}% M:{}%] {} <-> {}",
                 comb_pct.to_string().yellow(),
                 (jaccard * 100.0) as u32,
                 (simhash_sim * 100.0) as u32,
+                (minhash_sim * 100.0) as u32,
                 path1.cyan(),
                 path2
             );
