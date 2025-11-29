@@ -1,0 +1,23 @@
+[package]
+name = "yore"
+version = "0.1.0"
+edition = "2021"
+description = "Fast document indexer for finding duplicates and searching content"
+license = "MIT"
+keywords = ["documentation", "index", "search", "duplicates"]
+categories = ["command-line-utilities", "text-processing"]
+
+[dependencies]
+clap = { version = "4", features = ["derive"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+walkdir = "2"
+ignore = "0.4"
+regex = "1"
+colored = "2"
+toml = "0.8"
+
+[profile.release]
+lto = true
+codegen-units = 1
+strip = true
