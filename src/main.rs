@@ -112,6 +112,25 @@ enum Commands {
         index: PathBuf,
     },
 
+    /// Find duplicate sections across documents
+    DupesSections {
+        /// Similarity threshold (0.0 to 1.0)
+        #[arg(short, long, default_value = "0.7")]
+        threshold: f64,
+
+        /// Minimum number of files sharing a section
+        #[arg(short = 'n', long, default_value = "2")]
+        min_files: usize,
+
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+
+        /// Index directory
+        #[arg(short, long, default_value = ".yore")]
+        index: PathBuf,
+    },
+
     /// Show what's shared between two files
     Diff {
         /// First file
@@ -156,11 +175,13 @@ struct FileEntry {
     links: Vec<Link>,
     simhash: u64,  // content fingerprint
     #[serde(default)]
-    term_frequencies: HashMap<String, usize>,  // NEW: term counts for BM25
+    term_frequencies: HashMap<String, usize>,  // term counts for BM25
     #[serde(default)]
-    doc_length: usize,  // NEW: total terms for BM25
+    doc_length: usize,  // total terms for BM25
     #[serde(default)]
-    minhash: Vec<u64>,  // NEW: MinHash signature for LSH
+    minhash: Vec<u64>,  // MinHash signature for LSH
+    #[serde(default)]
+    section_fingerprints: Vec<SectionFingerprint>,  // NEW: section-level SimHash
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -175,6 +196,15 @@ struct Link {
     line: usize,
     text: String,
     target: String,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+struct SectionFingerprint {
+    heading: String,
+    level: usize,
+    line_start: usize,
+    line_end: usize,
+    simhash: u64,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -225,6 +255,9 @@ fn main() {
         }
         Commands::Dupes { threshold, group, json, index } => {
             cmd_dupes(threshold, group, json, &index)
+        }
+        Commands::DupesSections { threshold, min_files, json, index } => {
+            cmd_dupes_sections(threshold, min_files, json, &index)
         }
         Commands::Diff { file1, file2, index } => {
             cmd_diff(&file1, &file2, &index)
@@ -521,6 +554,9 @@ fn index_file(path: &Path) -> Result<FileEntry, Box<dyn std::error::Error>> {
         .collect();
     let minhash = compute_minhash(&all_keywords, 128);
 
+    // NEW: Compute section-level SimHash fingerprints
+    let section_fingerprints = index_sections(&content, &headings);
+
     // Compute simhash fingerprint
     let simhash = compute_simhash(&content);
 
@@ -536,6 +572,7 @@ fn index_file(path: &Path) -> Result<FileEntry, Box<dyn std::error::Error>> {
         term_frequencies,
         doc_length: total_terms,
         minhash,
+        section_fingerprints,
     })
 }
 
@@ -630,6 +667,36 @@ fn hamming_distance(a: u64, b: u64) -> u32 {
 fn simhash_similarity(a: u64, b: u64) -> f64 {
     let distance = hamming_distance(a, b);
     1.0 - (distance as f64 / 64.0)
+}
+
+/// Index sections of a document with SimHash fingerprints
+fn index_sections(content: &str, headings: &[Heading]) -> Vec<SectionFingerprint> {
+    let lines: Vec<&str> = content.lines().collect();
+    let mut sections = Vec::new();
+
+    if headings.is_empty() {
+        return sections;
+    }
+
+    for i in 0..headings.len() {
+        let start = headings[i].line.saturating_sub(1);
+        let end = headings.get(i + 1)
+            .map(|h| h.line.saturating_sub(1))
+            .unwrap_or(lines.len());
+
+        // Extract section text
+        let section_text = lines[start..end].join("\n");
+
+        sections.push(SectionFingerprint {
+            heading: headings[i].text.clone(),
+            level: headings[i].level,
+            line_start: start + 1,
+            line_end: end,
+            simhash: compute_simhash(&section_text),
+        });
+    }
+
+    sections
 }
 
 /// Compute MinHash signature for a set of keywords
@@ -1122,6 +1189,160 @@ fn cmd_diff(
         if shared_headings.len() > 10 {
             println!("  ... and {} more", shared_headings.len() - 10);
         }
+    }
+
+    Ok(())
+}
+
+/// Find duplicate sections across documents
+fn cmd_dupes_sections(
+    threshold: f64,
+    min_files: usize,
+    json: bool,
+    index_dir: &Path,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let forward_index = load_forward_index(index_dir)?;
+    let start = Instant::now();
+
+    // Collect all sections from all files
+    #[derive(Debug, Clone)]
+    struct SectionInfo {
+        file_path: String,
+        heading: String,
+        line_start: usize,
+        line_end: usize,
+        simhash: u64,
+    }
+
+    let mut all_sections: Vec<SectionInfo> = Vec::new();
+    for (path, entry) in &forward_index.files {
+        for section in &entry.section_fingerprints {
+            all_sections.push(SectionInfo {
+                file_path: path.clone(),
+                heading: section.heading.clone(),
+                line_start: section.line_start,
+                line_end: section.line_end,
+                simhash: section.simhash,
+            });
+        }
+    }
+
+    if all_sections.is_empty() {
+        println!("{}", "No sections found in indexed files.".yellow());
+        return Ok(());
+    }
+
+    // Group similar sections using SimHash similarity
+    #[derive(Debug)]
+    struct SectionCluster {
+        heading: String,
+        files: Vec<(String, f64, usize, usize)>,  // (file_path, similarity, line_start, line_end)
+        avg_simhash: u64,
+    }
+
+    let mut clusters: Vec<SectionCluster> = Vec::new();
+
+    for section in all_sections.iter() {
+        let mut best_cluster_idx: Option<usize> = None;
+        let mut best_similarity = 0.0;
+
+        // Find best matching cluster
+        for (cluster_idx, cluster) in clusters.iter().enumerate() {
+            let similarity = simhash_similarity(section.simhash, cluster.avg_simhash);
+            if similarity >= threshold && similarity > best_similarity {
+                best_similarity = similarity;
+                best_cluster_idx = Some(cluster_idx);
+            }
+        }
+
+        if let Some(cluster_idx) = best_cluster_idx {
+            // Add to existing cluster
+            clusters[cluster_idx].files.push((
+                section.file_path.clone(),
+                best_similarity,
+                section.line_start,
+                section.line_end,
+            ));
+        } else {
+            // Create new cluster
+            clusters.push(SectionCluster {
+                heading: section.heading.clone(),
+                files: vec![(
+                    section.file_path.clone(),
+                    1.0,
+                    section.line_start,
+                    section.line_end,
+                )],
+                avg_simhash: section.simhash,
+            });
+        }
+    }
+
+    let elapsed = start.elapsed();
+
+    // Filter clusters by min_files threshold
+    let duplicate_clusters: Vec<_> = clusters.into_iter()
+        .filter(|c| c.files.len() >= min_files)
+        .collect();
+
+    if duplicate_clusters.is_empty() {
+        println!("{}", format!("No duplicate sections found with {} or more files at {}% threshold.",
+            min_files, (threshold * 100.0) as u32).green());
+        eprintln!("Section analysis: {:?} ({} sections analyzed)", elapsed, all_sections.len());
+        return Ok(());
+    }
+
+    // Sort clusters by number of files (descending)
+    let mut sorted_clusters = duplicate_clusters;
+    sorted_clusters.sort_by(|a, b| b.files.len().cmp(&a.files.len()));
+
+    if json {
+        let output: Vec<_> = sorted_clusters.iter()
+            .map(|cluster| serde_json::json!({
+                "heading": cluster.heading,
+                "file_count": cluster.files.len(),
+                "files": cluster.files.iter().map(|(path, sim, start, end)| {
+                    serde_json::json!({
+                        "path": path,
+                        "similarity": sim,
+                        "line_start": start,
+                        "line_end": end,
+                    })
+                }).collect::<Vec<_>>(),
+            }))
+            .collect();
+        println!("{}", serde_json::to_string_pretty(&output)?);
+        return Ok(());
+    }
+
+    println!("{} duplicate section clusters found (threshold: {}%, min files: {})",
+        sorted_clusters.len().to_string().yellow().bold(),
+        (threshold * 100.0) as u32,
+        min_files
+    );
+    eprintln!("Section analysis: {:?} ({} sections analyzed)\n", elapsed, all_sections.len());
+
+    for cluster in sorted_clusters.iter().take(20) {
+        println!("{} {} ({} files)",
+            "Section:".cyan().bold(),
+            cluster.heading.yellow(),
+            cluster.files.len()
+        );
+
+        for (path, similarity, line_start, line_end) in &cluster.files {
+            let sim_pct = (similarity * 100.0) as u32;
+            println!("  {}% {}:{}-{}",
+                sim_pct.to_string().dimmed(),
+                path,
+                line_start,
+                line_end
+            );
+        }
+        println!();
+    }
+
+    if sorted_clusters.len() > 20 {
+        println!("{}", format!("... and {} more section clusters", sorted_clusters.len() - 20).dimmed());
     }
 
     Ok(())
