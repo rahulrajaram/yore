@@ -198,6 +198,65 @@ enum Commands {
         #[arg(short, long, default_value = ".yore")]
         index: PathBuf,
     },
+
+    /// Check all markdown links for validity
+    CheckLinks {
+        /// Index directory
+        #[arg(short, long, default_value = ".yore")]
+        index: PathBuf,
+
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+
+        /// Root directory for resolving relative paths
+        #[arg(short, long)]
+        root: Option<PathBuf>,
+    },
+
+    /// Find all files that link to a specific file
+    Backlinks {
+        /// File to find backlinks for
+        file: String,
+
+        /// Index directory
+        #[arg(short, long, default_value = ".yore")]
+        index: PathBuf,
+
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Find orphaned files with no inbound links
+    Orphans {
+        /// Index directory
+        #[arg(short, long, default_value = ".yore")]
+        index: PathBuf,
+
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+
+        /// Exclude files matching pattern (can be repeated)
+        #[arg(short, long)]
+        exclude: Vec<String>,
+    },
+
+    /// Show canonicality scores for all documents
+    Canonicality {
+        /// Index directory
+        #[arg(short, long, default_value = ".yore")]
+        index: PathBuf,
+
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+
+        /// Minimum score threshold (0.0 to 1.0)
+        #[arg(short, long, default_value = "0.0")]
+        threshold: f64,
+    },
 }
 
 // Evaluation structures
@@ -218,6 +277,69 @@ struct EvalResult {
     total: usize,
     passed: bool,
     tokens: usize,
+}
+
+// Link checking structures
+#[derive(Serialize, Debug, Clone)]
+struct BrokenLink {
+    source_file: String,
+    line_number: usize,
+    link_text: String,
+    link_target: String,
+    error: String,
+    anchor: Option<String>,
+}
+
+#[derive(Serialize, Debug)]
+struct LinkCheckResult {
+    total_links: usize,
+    valid_links: usize,
+    broken_links: usize,
+    broken: Vec<BrokenLink>,
+}
+
+// Backlinks structures
+#[derive(Serialize, Debug, Clone)]
+struct Backlink {
+    source_file: String,
+    link_text: String,
+    link_target: String,
+    anchor: Option<String>,
+}
+
+#[derive(Serialize, Debug)]
+struct BacklinksResult {
+    target_file: String,
+    total_backlinks: usize,
+    backlinks: Vec<Backlink>,
+}
+
+// Orphans structures
+#[derive(Serialize, Debug, Clone)]
+struct OrphanFile {
+    file: String,
+    size_bytes: u64,
+    line_count: usize,
+}
+
+#[derive(Serialize, Debug)]
+struct OrphansResult {
+    total_orphans: usize,
+    orphans: Vec<OrphanFile>,
+}
+
+// Canonicality structures
+#[derive(Serialize, Debug, Clone)]
+struct CanonicalityScore {
+    file: String,
+    score: f64,
+    reasons: Vec<String>,
+}
+
+#[derive(Serialize, Debug)]
+struct CanonicalityResult {
+    total_files: usize,
+    files: Vec<CanonicalityScore>,
 }
 
 // Index structures
@@ -330,6 +452,18 @@ fn main() {
         }
         Commands::Eval { questions, index } => {
             cmd_eval(&questions, &index)
+        }
+        Commands::CheckLinks { index, json, root } => {
+            cmd_check_links(&index, json, root.as_deref())
+        }
+        Commands::Backlinks { file, index, json } => {
+            cmd_backlinks(&file, &index, json)
+        }
+        Commands::Orphans { index, json, exclude } => {
+            cmd_orphans(&index, json, &exclude)
+        }
+        Commands::Canonicality { index, json, threshold } => {
+            cmd_canonicality(&index, json, threshold)
         }
     };
 
@@ -2883,6 +3017,581 @@ fn cmd_eval(
             }
         }
         println!();
+    }
+
+    Ok(())
+}
+
+/// Check all markdown links for validity
+fn cmd_check_links(
+    index_dir: &Path,
+    json: bool,
+    root: Option<&Path>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    // Load the forward index
+    let forward_index = load_forward_index(index_dir)?;
+
+    // Determine root directory for resolving relative paths
+    let root_dir = if let Some(r) = root {
+        r.to_path_buf()
+    } else {
+        // Extract root from index by finding common prefix of all paths
+        if let Some((first_path, _)) = forward_index.files.iter().next() {
+            let first_path = Path::new(first_path);
+            if let Some(parent) = first_path.parent() {
+                // Walk up to find the common root
+                let mut candidate = parent.to_path_buf();
+                while candidate.parent().is_some() {
+                    let parent_path = candidate.parent().unwrap();
+                    // Check if this is the common root by checking if it contains "docs"
+                    if candidate.file_name().and_then(|s| s.to_str()) == Some("docs") {
+                        break;
+                    }
+                    candidate = parent_path.to_path_buf();
+                }
+                candidate.parent().unwrap_or(Path::new(".")).to_path_buf()
+            } else {
+                Path::new(".").to_path_buf()
+            }
+        } else {
+            Path::new(".").to_path_buf()
+        }
+    };
+
+    if !json {
+        println!("{} {}", "Checking links in".cyan().bold(), root_dir.display());
+        println!();
+    }
+
+    // Build file set for fast lookup (keys of the HashMap)
+    let file_set: HashSet<String> = forward_index.files.keys().cloned().collect();
+
+    // Build heading index for anchor validation
+    let mut heading_index: HashMap<String, HashSet<String>> = HashMap::new();
+    for (path, entry) in &forward_index.files {
+        let mut anchors = HashSet::new();
+        for heading in &entry.headings {
+            // Convert heading text to anchor format (lowercase, replace spaces with hyphens)
+            let anchor = heading.text.to_lowercase().replace(' ', "-");
+            anchors.insert(anchor);
+        }
+        heading_index.insert(path.clone(), anchors);
+    }
+
+    let mut broken_links = Vec::new();
+    let mut total_links = 0;
+
+    // Iterate through all files and check their links
+    for (file_path, entry) in &forward_index.files {
+        for link in &entry.links {
+            total_links += 1;
+
+            let target = &link.target;
+
+            // Skip external links (http://, https://, mailto:, etc.)
+            if target.starts_with("http://")
+                || target.starts_with("https://")
+                || target.starts_with("mailto:")
+                || target.starts_with("ftp://") {
+                continue;
+            }
+
+            // Parse link to separate file path and anchor
+            let (link_path, anchor) = if let Some(idx) = target.find('#') {
+                (target[..idx].to_string(), Some(target[idx + 1..].to_string()))
+            } else {
+                (target.clone(), None)
+            };
+
+            // Resolve relative path
+            let resolved_path = if link_path.is_empty() {
+                // Just an anchor in the current file
+                file_path.clone()
+            } else if link_path.starts_with('/') {
+                // Absolute path from root
+                root_dir.join(&link_path[1..]).to_string_lossy().to_string()
+            } else {
+                // Relative path
+                let source_path = Path::new(file_path);
+                if let Some(parent) = source_path.parent() {
+                    parent.join(&link_path).to_string_lossy().to_string()
+                } else {
+                    link_path.clone()
+                }
+            };
+
+            // Normalize path (remove ./ and resolve ../)
+            let normalized_path = normalize_path(Path::new(&resolved_path));
+
+            // Check if file exists
+            if !file_set.contains(&normalized_path) && !link_path.is_empty() {
+                broken_links.push(BrokenLink {
+                    source_file: file_path.clone(),
+                    line_number: 0, // We don't track line numbers currently
+                    link_text: link.text.clone(),
+                    link_target: target.clone(),
+                    error: format!("Target file not found: {}", normalized_path),
+                    anchor: anchor.clone(),
+                });
+                continue;
+            }
+
+            // Check anchor if present
+            if let Some(ref anchor_text) = anchor {
+                let target_file = if link_path.is_empty() {
+                    file_path
+                } else {
+                    &normalized_path
+                };
+
+                if let Some(anchors) = heading_index.get(target_file) {
+                    if !anchors.contains(anchor_text as &str) {
+                        broken_links.push(BrokenLink {
+                            source_file: file_path.clone(),
+                            line_number: 0,
+                            link_text: link.text.clone(),
+                            link_target: target.clone(),
+                            error: format!("Anchor not found: #{}", anchor_text),
+                            anchor: Some(anchor_text.clone()),
+                        });
+                    }
+                } else {
+                    broken_links.push(BrokenLink {
+                        source_file: file_path.clone(),
+                        line_number: 0,
+                        link_text: link.text.clone(),
+                        link_target: target.clone(),
+                        error: format!("Could not verify anchor (file has no headings): #{}", anchor_text),
+                        anchor: Some(anchor_text.clone()),
+                    });
+                }
+            }
+        }
+    }
+
+    let valid_links = total_links - broken_links.len();
+
+    let result = LinkCheckResult {
+        total_links,
+        valid_links,
+        broken_links: broken_links.len(),
+        broken: broken_links.clone(),
+    };
+
+    if json {
+        println!("{}", serde_json::to_string_pretty(&result)?);
+    } else {
+        println!("{}", "Link Check Results".cyan().bold());
+        println!("{}", "=".repeat(60));
+        println!();
+        println!("Total links:  {}", total_links);
+        println!("Valid links:  {} {}", valid_links, "✓".green().bold());
+        println!("Broken links: {} {}", broken_links.len(), if broken_links.is_empty() { "✓".green().bold() } else { "✗".red().bold() });
+        println!();
+
+        if !broken_links.is_empty() {
+            println!("{}", "Broken Links:".red().bold());
+            println!();
+
+            for (idx, link) in broken_links.iter().enumerate() {
+                println!("[{}] {}", idx + 1, link.source_file.white().bold());
+                println!("    Link: [{}]({})", link.link_text, link.link_target);
+                println!("    Error: {}", link.error.red());
+                println!();
+            }
+        }
+    }
+
+    Ok(())
+}
+
+/// Find all files that link to a specific file
+fn cmd_backlinks(
+    target_file: &str,
+    index_dir: &Path,
+    json: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    // Load the forward index
+    let forward_index = load_forward_index(index_dir)?;
+
+    // Normalize the target file path for comparison
+    let normalized_target = normalize_path(Path::new(target_file));
+
+    if !json {
+        println!("{} {}", "Finding backlinks for".cyan().bold(), normalized_target.white().bold());
+        println!();
+    }
+
+    let mut backlinks = Vec::new();
+
+    // Iterate through all files and check if they link to the target
+    for (source_path, entry) in &forward_index.files {
+        for link in &entry.links {
+            let target = &link.target;
+
+            // Skip external links
+            if target.starts_with("http://")
+                || target.starts_with("https://")
+                || target.starts_with("mailto:")
+                || target.starts_with("ftp://") {
+                continue;
+            }
+
+            // Parse link to separate file path and anchor
+            let (link_path, anchor) = if let Some(idx) = target.find('#') {
+                (target[..idx].to_string(), Some(target[idx + 1..].to_string()))
+            } else {
+                (target.clone(), None)
+            };
+
+            // Resolve relative path from source file
+            let resolved_path = if link_path.is_empty() {
+                // Just an anchor in the current file
+                source_path.clone()
+            } else if link_path.starts_with('/') {
+                // Absolute path - strip leading / and use as-is
+                link_path[1..].to_string()
+            } else {
+                // Relative path
+                let source_file_path = Path::new(source_path);
+                if let Some(parent) = source_file_path.parent() {
+                    parent.join(&link_path).to_string_lossy().to_string()
+                } else {
+                    link_path.clone()
+                }
+            };
+
+            // Normalize the resolved path
+            let normalized_link = normalize_path(Path::new(&resolved_path));
+
+            // Check if this link points to our target file
+            if normalized_link == normalized_target {
+                backlinks.push(Backlink {
+                    source_file: source_path.clone(),
+                    link_text: link.text.clone(),
+                    link_target: target.clone(),
+                    anchor,
+                });
+            }
+        }
+    }
+
+    // Sort backlinks by source file for consistent output
+    backlinks.sort_by(|a, b| a.source_file.cmp(&b.source_file));
+
+    let result = BacklinksResult {
+        target_file: normalized_target.clone(),
+        total_backlinks: backlinks.len(),
+        backlinks: backlinks.clone(),
+    };
+
+    if json {
+        println!("{}", serde_json::to_string_pretty(&result)?);
+    } else {
+        println!("{}", "Backlinks Found".cyan().bold());
+        println!("{}", "=".repeat(60));
+        println!();
+        println!("Total backlinks: {}", backlinks.len());
+        println!();
+
+        if backlinks.is_empty() {
+            println!("{}", "No backlinks found. This file is not referenced by any other file.".yellow());
+            println!();
+            println!("{}", "This may indicate:".yellow());
+            println!("  - An orphaned document (consider reviewing for deletion)");
+            println!("  - A new document that needs linking");
+            println!("  - An entry point document (like README.md)");
+        } else {
+            for (idx, backlink) in backlinks.iter().enumerate() {
+                println!("[{}] {}", idx + 1, backlink.source_file.white().bold());
+                println!("    Link: [{}]({})", backlink.link_text, backlink.link_target);
+                if let Some(anchor) = &backlink.anchor {
+                    println!("    Anchor: #{}", anchor);
+                }
+                println!();
+            }
+
+            println!("{}", "Safe to delete?".yellow().bold());
+            println!("  {} These {} file(s) link to this document.", "⚠".yellow(), backlinks.len());
+            println!("  Review and update references before deletion.");
+        }
+    }
+
+    Ok(())
+}
+
+/// Find orphaned files with no inbound links
+fn cmd_orphans(
+    index_dir: &Path,
+    json: bool,
+    exclude_patterns: &[String],
+) -> Result<(), Box<dyn std::error::Error>> {
+    // Load the forward index
+    let forward_index = load_forward_index(index_dir)?;
+
+    if !json {
+        println!("{}", "Finding orphaned files...".cyan().bold());
+        println!();
+    }
+
+    // Build a set of all files that are linked to
+    let mut linked_files: HashSet<String> = HashSet::new();
+
+    for (source_path, entry) in &forward_index.files {
+        for link in &entry.links {
+            let target = &link.target;
+
+            // Skip external links
+            if target.starts_with("http://")
+                || target.starts_with("https://")
+                || target.starts_with("mailto:")
+                || target.starts_with("ftp://") {
+                continue;
+            }
+
+            // Parse link to separate file path and anchor
+            let (link_path, _) = if let Some(idx) = target.find('#') {
+                (target[..idx].to_string(), Some(target[idx + 1..].to_string()))
+            } else {
+                (target.clone(), None)
+            };
+
+            // Skip anchor-only links
+            if link_path.is_empty() {
+                continue;
+            }
+
+            // Resolve relative path from source file
+            let resolved_path = if link_path.starts_with('/') {
+                // Absolute path - strip leading / and use as-is
+                link_path[1..].to_string()
+            } else {
+                // Relative path
+                let source_file_path = Path::new(source_path);
+                if let Some(parent) = source_file_path.parent() {
+                    parent.join(&link_path).to_string_lossy().to_string()
+                } else {
+                    link_path.clone()
+                }
+            };
+
+            // Normalize the resolved path
+            let normalized_link = normalize_path(Path::new(&resolved_path));
+            linked_files.insert(normalized_link);
+        }
+    }
+
+    // Find files that are NOT in the linked set
+    let mut orphans = Vec::new();
+
+    for (file_path, entry) in &forward_index.files {
+        // Check if this file has any inbound links
+        if !linked_files.contains(file_path) {
+            // Check exclude patterns
+            let mut excluded = false;
+            for pattern in exclude_patterns {
+                if file_path.contains(pattern) {
+                    excluded = true;
+                    break;
+                }
+            }
+
+            if excluded {
+                continue;
+            }
+
+            orphans.push(OrphanFile {
+                file: file_path.clone(),
+                size_bytes: entry.size_bytes,
+                line_count: entry.line_count,
+            });
+        }
+    }
+
+    // Sort orphans by file path
+    orphans.sort_by(|a, b| a.file.cmp(&b.file));
+
+    let result = OrphansResult {
+        total_orphans: orphans.len(),
+        orphans: orphans.clone(),
+    };
+
+    if json {
+        println!("{}", serde_json::to_string_pretty(&result)?);
+    } else {
+        println!("{}", "Orphaned Files".cyan().bold());
+        println!("{}", "=".repeat(60));
+        println!();
+        println!("Total orphans: {}", orphans.len());
+        println!();
+
+        if orphans.is_empty() {
+            println!("{}", "No orphaned files found. All documents are linked!".green());
+            println!();
+        } else {
+            for (idx, orphan) in orphans.iter().enumerate() {
+                println!("[{}] {}", idx + 1, orphan.file.white().bold());
+                println!("    Size: {} bytes, Lines: {}", orphan.size_bytes, orphan.line_count);
+                println!();
+            }
+
+            println!("{}", "Cleanup suggestions:".yellow().bold());
+            println!("  1. Review each file to determine if it's still needed");
+            println!("  2. Add links from relevant documents if the content is valuable");
+            println!("  3. Delete or archive files that are no longer relevant");
+            println!("  4. Entry point files (README.md) may intentionally have no backlinks");
+            println!();
+            println!("{}", "To exclude patterns:".cyan());
+            println!("  yore orphans --exclude README --exclude INDEX");
+        }
+    }
+
+    Ok(())
+}
+
+/// Score canonicality with reasons
+fn score_canonicality_with_reasons(doc_path: &str, _entry: &FileEntry) -> (f64, Vec<String>) {
+    let mut score: f64 = 0.5; // baseline
+    let mut reasons = Vec::new();
+
+    let path_lower = doc_path.to_lowercase();
+
+    // Path-based boosts
+    if path_lower.contains("docs/adr/") || path_lower.contains("docs/architecture/") {
+        score += 0.2;
+        reasons.push("Architecture/ADR document (+0.2)".to_string());
+    }
+    if path_lower.contains("docs/index/") {
+        score += 0.15;
+        reasons.push("Index document (+0.15)".to_string());
+    }
+    if path_lower.contains("scratch") || path_lower.contains("archive") || path_lower.contains("old") {
+        score -= 0.3;
+        reasons.push("Scratch/archive/old location (-0.3)".to_string());
+    }
+    if path_lower.contains("deprecated") || path_lower.contains("backup") {
+        score -= 0.25;
+        reasons.push("Deprecated/backup location (-0.25)".to_string());
+    }
+
+    // Filename patterns
+    let filename = Path::new(doc_path)
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or("")
+        .to_lowercase();
+
+    if filename.contains("readme") || filename.contains("index") {
+        score += 0.1;
+        reasons.push("README/INDEX file (+0.1)".to_string());
+    }
+    if filename.contains("guide") || filename.contains("runbook") || filename.contains("plan") {
+        score += 0.1;
+        reasons.push("Guide/runbook/plan document (+0.1)".to_string());
+    }
+
+    // Clamp to [0.0, 1.0]
+    let final_score = score.max(0.0).min(1.0);
+
+    if reasons.is_empty() {
+        reasons.push("Baseline score (0.5)".to_string());
+    }
+
+    (final_score, reasons)
+}
+
+/// Show canonicality scores for all documents
+fn cmd_canonicality(
+    index_dir: &Path,
+    json: bool,
+    threshold: f64,
+) -> Result<(), Box<dyn std::error::Error>> {
+    // Load the forward index
+    let forward_index = load_forward_index(index_dir)?;
+
+    if !json {
+        println!("{}", "Computing canonicality scores...".cyan().bold());
+        println!();
+    }
+
+    let mut scored_files = Vec::new();
+
+    for (file_path, entry) in &forward_index.files {
+        let (score, reasons) = score_canonicality_with_reasons(file_path, entry);
+
+        if score >= threshold {
+            scored_files.push(CanonicalityScore {
+                file: file_path.clone(),
+                score,
+                reasons,
+            });
+        }
+    }
+
+    // Sort by score descending
+    scored_files.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+
+    let result = CanonicalityResult {
+        total_files: scored_files.len(),
+        files: scored_files.clone(),
+    };
+
+    if json {
+        println!("{}", serde_json::to_string_pretty(&result)?);
+    } else {
+        println!("{}", "Canonicality Scores".cyan().bold());
+        println!("{}", "=".repeat(60));
+        println!();
+        println!("Total files: {} (threshold: {})", scored_files.len(), threshold);
+        println!();
+
+        // Group by score ranges
+        let high_canon: Vec<_> = scored_files.iter().filter(|s| s.score >= 0.7).collect();
+        let medium_canon: Vec<_> = scored_files.iter().filter(|s| s.score >= 0.5 && s.score < 0.7).collect();
+        let low_canon: Vec<_> = scored_files.iter().filter(|s| s.score < 0.5).collect();
+
+        println!("{} High canonicality (≥0.7): {} files", "📚".green(), high_canon.len());
+        for file in high_canon.iter().take(10) {
+            println!("  [{:.2}] {}", file.score, file.file.white().bold());
+            for reason in &file.reasons {
+                println!("         - {}", reason);
+            }
+        }
+        if high_canon.len() > 10 {
+            println!("  ... and {} more", high_canon.len() - 10);
+        }
+        println!();
+
+        println!("{} Medium canonicality (0.5-0.7): {} files", "📄".yellow(), medium_canon.len());
+        for file in medium_canon.iter().take(5) {
+            println!("  [{:.2}] {}", file.score, file.file);
+        }
+        if medium_canon.len() > 5 {
+            println!("  ... and {} more", medium_canon.len() - 5);
+        }
+        println!();
+
+        println!("{} Low canonicality (<0.5): {} files", "📋".red(), low_canon.len());
+        for file in low_canon.iter().take(5) {
+            println!("  [{:.2}] {}", file.score, file.file);
+            for reason in &file.reasons {
+                println!("         - {}", reason);
+            }
+        }
+        if low_canon.len() > 5 {
+            println!("  ... and {} more", low_canon.len() - 5);
+        }
+        println!();
+
+        println!("{}", "What does this mean?".yellow().bold());
+        println!("  - High scores: Authoritative, well-placed documents");
+        println!("  - Medium scores: Standard documentation");
+        println!("  - Low scores: Scratch work, archived, or deprecated content");
+        println!();
+        println!("{}", "For decision support:".cyan());
+        println!("  - Trust high-canon docs when resolving conflicts");
+        println!("  - Review low-canon docs for potential archival");
+        println!("  - Use threshold flag to filter: --threshold 0.6");
     }
 
     Ok(())
