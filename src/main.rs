@@ -1538,6 +1538,31 @@ struct SectionMatch {
     canonicality: f64,
 }
 
+// Cross-reference expansion (Phase 2.2)
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+enum RefType {
+    MarkdownLink,
+    AdrId,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct CrossRef {
+    ref_type: RefType,
+    origin_doc_path: String,
+    target_doc_path: String,
+    target_anchor: Option<String>,
+    raw_text: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+enum DocType {
+    Adr,     // Priority 1
+    Design,  // Priority 2
+    Ops,     // Priority 3
+    Other,   // Priority 4
+}
+
 /// Search for relevant sections using BM25 scoring
 fn search_relevant_sections(
     query: &str,
@@ -1792,12 +1817,564 @@ fn estimate_tokens(text: &str) -> usize {
     text.len() / 4
 }
 
+/// Build ADR index mapping ADR numbers to file paths
+fn build_adr_index(index: &ForwardIndex) -> HashMap<String, String> {
+    let mut adr_map = HashMap::new();
+    let adr_regex = Regex::new(r"ADR[-_]?(\d{2,4})").unwrap();
+
+    for (path, _) in &index.files {
+        let path_lower = path.to_lowercase();
+        if path_lower.contains("/adr/") || path_lower.contains("adr-") {
+            if let Some(caps) = adr_regex.captures(path) {
+                if let Some(num_str) = caps.get(1) {
+                    // Zero-pad to 3 digits
+                    let num: usize = num_str.as_str().parse().unwrap_or(0);
+                    let normalized = format!("{:03}", num);
+                    adr_map.insert(normalized, path.clone());
+                }
+            }
+        }
+    }
+
+    adr_map
+}
+
+/// Parse markdown links from a section's content
+fn parse_markdown_links(
+    section: &SectionMatch,
+    origin_dir: &Path,
+) -> Vec<CrossRef> {
+    let mut refs = Vec::new();
+
+    // Regex: [text](target) - we'll filter out ![image] manually
+    let link_regex = Regex::new(r"(!?)\[(?P<label>[^\]]+)\]\((?P<target>[^)]+)\)").unwrap();
+
+    for caps in link_regex.captures_iter(&section.content) {
+        // Skip if this is an image link (starts with !)
+        if caps.get(1).map_or(false, |m| m.as_str() == "!") {
+            continue;
+        }
+
+        if let (Some(label), Some(target)) = (caps.name("label"), caps.name("target")) {
+            let target_str = target.as_str();
+
+            // Skip external links
+            if target_str.starts_with("http://")
+                || target_str.starts_with("https://")
+                || target_str.starts_with("mailto:")
+            {
+                continue;
+            }
+
+            // Parse target: path.md#anchor
+            let (path_part, anchor) = if let Some(hash_pos) = target_str.find('#') {
+                (&target_str[..hash_pos], Some(target_str[hash_pos + 1..].to_string()))
+            } else {
+                (target_str, None)
+            };
+
+            // Skip non-markdown links
+            if !path_part.ends_with(".md") && !path_part.ends_with(".txt") && !path_part.ends_with(".rst") {
+                continue;
+            }
+
+            // Resolve relative path
+            let target_path = if path_part.starts_with('/') {
+                // Absolute path within repo - strip leading /
+                PathBuf::from(path_part.trim_start_matches('/'))
+            } else {
+                // Relative path - resolve from origin doc's directory
+                origin_dir.join(path_part)
+            };
+
+            // Normalize path
+            let normalized = normalize_path(&target_path);
+
+            // Skip self-links
+            if normalized == section.doc_path {
+                continue;
+            }
+
+            refs.push(CrossRef {
+                ref_type: RefType::MarkdownLink,
+                origin_doc_path: section.doc_path.clone(),
+                target_doc_path: normalized,
+                target_anchor: anchor,
+                raw_text: label.as_str().to_string(),
+            });
+        }
+    }
+
+    refs
+}
+
+/// Normalize a path (resolve .. and .)
+fn normalize_path(path: &Path) -> String {
+    let mut components = Vec::new();
+
+    for component in path.components() {
+        match component {
+            std::path::Component::Normal(c) => components.push(c.to_string_lossy().to_string()),
+            std::path::Component::ParentDir => {
+                components.pop();
+            }
+            std::path::Component::CurDir => {}
+            _ => {}
+        }
+    }
+
+    components.join("/")
+}
+
+/// Parse ADR ID references from section content
+fn parse_adr_ids(
+    section: &SectionMatch,
+    adr_index: &HashMap<String, String>,
+) -> Vec<CrossRef> {
+    let mut refs = Vec::new();
+
+    // Regex: ADR-013, ADR 13, ADR_0013
+    let adr_regex = Regex::new(r"\bADR[-_ ]?(?P<num>\d{2,4})\b").unwrap();
+
+    for caps in adr_regex.captures_iter(&section.content) {
+        if let Some(num) = caps.name("num") {
+            let num_str = num.as_str();
+            let num_val: usize = num_str.parse().unwrap_or(0);
+
+            // Zero-pad to 3 digits
+            let normalized = format!("{:03}", num_val);
+
+            // Lookup in ADR index
+            if let Some(target_path) = adr_index.get(&normalized) {
+                // Skip if same file
+                if target_path == &section.doc_path {
+                    continue;
+                }
+
+                refs.push(CrossRef {
+                    ref_type: RefType::AdrId,
+                    origin_doc_path: section.doc_path.clone(),
+                    target_doc_path: target_path.clone(),
+                    target_anchor: None,
+                    raw_text: caps.get(0).unwrap().as_str().to_string(),
+                });
+            }
+        }
+    }
+
+    refs
+}
+
+/// Collect and deduplicate cross-references from primary sections
+fn collect_crossrefs(
+    sections: &[SectionMatch],
+    adr_index: &HashMap<String, String>,
+) -> Vec<CrossRef> {
+    let mut all_refs = Vec::new();
+
+    for section in sections {
+        // Get parent directory of origin doc
+        let origin_dir = Path::new(&section.doc_path)
+            .parent()
+            .unwrap_or_else(|| Path::new("."));
+
+        // Parse markdown links
+        all_refs.extend(parse_markdown_links(section, origin_dir));
+
+        // Parse ADR IDs
+        all_refs.extend(parse_adr_ids(section, adr_index));
+    }
+
+    // Deduplicate by (origin_doc_path, target_doc_path, target_anchor)
+    let mut seen: HashSet<(String, String, Option<String>)> = HashSet::new();
+    let mut unique_refs = Vec::new();
+
+    for r in all_refs {
+        let key = (
+            r.origin_doc_path.clone(),
+            r.target_doc_path.clone(),
+            r.target_anchor.clone(),
+        );
+
+        if !seen.contains(&key) {
+            seen.insert(key);
+            unique_refs.push(r);
+        }
+    }
+
+    unique_refs
+}
+
+/// Classify target document by type
+fn classify_target_doc(path: &str) -> DocType {
+    let path_lower = path.to_lowercase();
+
+    if path_lower.contains("/adr/") || path_lower.contains("adr-") {
+        DocType::Adr
+    } else if path_lower.contains("architecture") || path_lower.contains("design") {
+        DocType::Design
+    } else if path_lower.contains("runbook") || path_lower.contains("operations") || path_lower.contains("ops") {
+        DocType::Ops
+    } else {
+        DocType::Other
+    }
+}
+
+/// Select sections from an ADR doc
+fn select_sections_for_adr(
+    doc_path: &str,
+    entry: &FileEntry,
+    max_sections: usize,
+) -> Vec<SectionMatch> {
+    let mut sections = Vec::new();
+
+    // Priority sections: Context, Decision, Consequences
+    let priority_keywords = ["context", "decision", "consequences", "motivation", "rationale", "summary"];
+
+    if let Ok(content) = fs::read_to_string(doc_path) {
+        let lines: Vec<&str> = content.lines().collect();
+
+        // Try to use section fingerprints
+        for section in &entry.section_fingerprints {
+            if sections.len() >= max_sections {
+                break;
+            }
+
+            // Check if this is a priority section
+            let heading_lower = section.heading.to_lowercase();
+            let is_priority = priority_keywords.iter().any(|kw| heading_lower.contains(kw));
+
+            if is_priority || sections.is_empty() {
+                // Include this section
+                let start = section.line_start.saturating_sub(1);
+                let end = section.line_end.min(lines.len());
+
+                if start < end {
+                    let section_content = lines[start..end].join("\n");
+
+                    sections.push(SectionMatch {
+                        doc_path: doc_path.to_string(),
+                        heading: section.heading.clone(),
+                        line_start: section.line_start,
+                        line_end: section.line_end,
+                        bm25_score: 0.0, // Cross-ref sections don't have BM25 scores
+                        content: section_content,
+                        canonicality: score_canonicality(doc_path, entry),
+                    });
+                }
+            }
+        }
+
+        // If no sections found, include the first section or full doc
+        if sections.is_empty() && !lines.is_empty() {
+            sections.push(SectionMatch {
+                doc_path: doc_path.to_string(),
+                heading: "Full Document".to_string(),
+                line_start: 1,
+                line_end: lines.len().min(100), // Limit to first 100 lines
+                bm25_score: 0.0,
+                content: lines[..lines.len().min(100)].join("\n"),
+                canonicality: score_canonicality(doc_path, entry),
+            });
+        }
+    }
+
+    sections
+}
+
+/// Select sections from a design/architecture doc
+fn select_sections_for_design(
+    doc_path: &str,
+    entry: &FileEntry,
+    anchor: Option<&str>,
+    max_sections: usize,
+) -> Vec<SectionMatch> {
+    let mut sections = Vec::new();
+
+    if let Ok(content) = fs::read_to_string(doc_path) {
+        let lines: Vec<&str> = content.lines().collect();
+
+        // If anchor is specified, try to find matching section
+        if let Some(anchor_str) = anchor {
+            let anchor_lower = anchor_str.to_lowercase().replace('-', " ").replace('_', " ");
+
+            for section in &entry.section_fingerprints {
+                let heading_lower = section.heading.to_lowercase();
+                let heading_slug = heading_lower.replace(' ', "-");
+
+                if heading_slug.contains(&anchor_str.replace(' ', "-")) || heading_lower.contains(&anchor_lower) {
+                    // Found matching section
+                    let start = section.line_start.saturating_sub(1);
+                    let end = section.line_end.min(lines.len());
+
+                    if start < end {
+                        let section_content = lines[start..end].join("\n");
+
+                        sections.push(SectionMatch {
+                            doc_path: doc_path.to_string(),
+                            heading: section.heading.clone(),
+                            line_start: section.line_start,
+                            line_end: section.line_end,
+                            bm25_score: 0.0,
+                            content: section_content,
+                            canonicality: score_canonicality(doc_path, entry),
+                        });
+                    }
+
+                    break; // Found the target section
+                }
+            }
+        }
+
+        // If no anchor or not found, include first few sections
+        if sections.is_empty() {
+            for section in entry.section_fingerprints.iter().take(max_sections) {
+                let start = section.line_start.saturating_sub(1);
+                let end = section.line_end.min(lines.len());
+
+                if start < end {
+                    let section_content = lines[start..end].join("\n");
+
+                    sections.push(SectionMatch {
+                        doc_path: doc_path.to_string(),
+                        heading: section.heading.clone(),
+                        line_start: section.line_start,
+                        line_end: section.line_end,
+                        bm25_score: 0.0,
+                        content: section_content,
+                        canonicality: score_canonicality(doc_path, entry),
+                    });
+                }
+            }
+        }
+
+        // Fallback: if still no sections, include beginning of doc
+        if sections.is_empty() && !lines.is_empty() {
+            sections.push(SectionMatch {
+                doc_path: doc_path.to_string(),
+                heading: "Introduction".to_string(),
+                line_start: 1,
+                line_end: lines.len().min(50),
+                bm25_score: 0.0,
+                content: lines[..lines.len().min(50)].join("\n"),
+                canonicality: score_canonicality(doc_path, entry),
+            });
+        }
+    }
+
+    sections
+}
+
+/// Select sections from an ops/runbook doc
+fn select_sections_for_ops(
+    doc_path: &str,
+    entry: &FileEntry,
+    max_sections: usize,
+) -> Vec<SectionMatch> {
+    let mut sections = Vec::new();
+
+    // Keywords for ops docs
+    let ops_keywords = ["deploy", "restart", "rollback", "monitor", "troubleshoot", "debug", "fix", "restore"];
+
+    if let Ok(content) = fs::read_to_string(doc_path) {
+        let lines: Vec<&str> = content.lines().collect();
+
+        // Prioritize sections with ops keywords
+        for section in &entry.section_fingerprints {
+            if sections.len() >= max_sections {
+                break;
+            }
+
+            let heading_lower = section.heading.to_lowercase();
+            let is_ops = ops_keywords.iter().any(|kw| heading_lower.contains(kw));
+
+            if is_ops {
+                let start = section.line_start.saturating_sub(1);
+                let end = section.line_end.min(lines.len());
+
+                if start < end {
+                    let section_content = lines[start..end].join("\n");
+
+                    sections.push(SectionMatch {
+                        doc_path: doc_path.to_string(),
+                        heading: section.heading.clone(),
+                        line_start: section.line_start,
+                        line_end: section.line_end,
+                        bm25_score: 0.0,
+                        content: section_content,
+                        canonicality: score_canonicality(doc_path, entry),
+                    });
+                }
+            }
+        }
+
+        // If no ops sections found, include first section
+        if sections.is_empty() && !entry.section_fingerprints.is_empty() {
+            let section = &entry.section_fingerprints[0];
+            let start = section.line_start.saturating_sub(1);
+            let end = section.line_end.min(lines.len());
+
+            if start < end {
+                let section_content = lines[start..end].join("\n");
+
+                sections.push(SectionMatch {
+                    doc_path: doc_path.to_string(),
+                    heading: section.heading.clone(),
+                    line_start: section.line_start,
+                    line_end: section.line_end,
+                    bm25_score: 0.0,
+                    content: section_content,
+                    canonicality: score_canonicality(doc_path, entry),
+                });
+            }
+        }
+    }
+
+    sections
+}
+
+/// Select sections from an "other" type doc
+fn select_sections_for_other(
+    doc_path: &str,
+    entry: &FileEntry,
+) -> Vec<SectionMatch> {
+    let mut sections = Vec::new();
+
+    if let Ok(content) = fs::read_to_string(doc_path) {
+        let lines: Vec<&str> = content.lines().collect();
+
+        // Include only the first section (overview)
+        if !entry.section_fingerprints.is_empty() {
+            let section = &entry.section_fingerprints[0];
+            let start = section.line_start.saturating_sub(1);
+            let end = section.line_end.min(lines.len());
+
+            if start < end {
+                let section_content = lines[start..end].join("\n");
+
+                sections.push(SectionMatch {
+                    doc_path: doc_path.to_string(),
+                    heading: section.heading.clone(),
+                    line_start: section.line_start,
+                    line_end: section.line_end,
+                    bm25_score: 0.0,
+                    content: section_content,
+                    canonicality: score_canonicality(doc_path, entry),
+                });
+            }
+        }
+    }
+
+    sections
+}
+
+/// Resolve cross-references into additional sections to include
+fn resolve_crossrefs(
+    crossrefs: &[CrossRef],
+    primary_docs: &HashSet<String>,
+    index: &ForwardIndex,
+    xref_token_budget: usize,
+) -> Vec<SectionMatch> {
+    const MAX_SECTIONS_PER_ADR: usize = 3;
+    const MAX_SECTIONS_PER_DESIGN: usize = 2;
+    const MAX_SECTIONS_PER_OPS: usize = 2;
+    const MAX_TOKENS_PER_XREF_DOC: usize = 600;
+
+    let mut xref_sections = Vec::new();
+    let mut remaining_budget = xref_token_budget;
+    let mut visited_docs: HashSet<String> = primary_docs.clone();
+
+    // Group crossrefs by target doc
+    let mut doc_refs: HashMap<String, Vec<&CrossRef>> = HashMap::new();
+    for cr in crossrefs {
+        // Skip if already in primary docs or visited
+        if visited_docs.contains(&cr.target_doc_path) {
+            continue;
+        }
+
+        doc_refs
+            .entry(cr.target_doc_path.clone())
+            .or_insert_with(Vec::new)
+            .push(cr);
+    }
+
+    // Sort target docs by priority and score
+    let mut target_docs: Vec<(String, Vec<&CrossRef>)> = doc_refs.into_iter().collect();
+    target_docs.sort_by(|a, b| {
+        let type_a = classify_target_doc(&a.0);
+        let type_b = classify_target_doc(&b.0);
+
+        // First by doc type priority
+        let cmp = type_a.cmp(&type_b);
+        if cmp != std::cmp::Ordering::Equal {
+            return cmp;
+        }
+
+        // Then by number of references (descending)
+        b.1.len().cmp(&a.1.len())
+    });
+
+    // Process each target doc in priority order
+    for (target_path, refs) in target_docs {
+        if remaining_budget == 0 {
+            break;
+        }
+
+        // Get file entry
+        let entry = match index.files.get(&target_path) {
+            Some(e) => e,
+            None => continue, // Doc not in index
+        };
+
+        let doc_type = classify_target_doc(&target_path);
+
+        // Select sections based on doc type
+        let mut doc_sections = match doc_type {
+            DocType::Adr => select_sections_for_adr(&target_path, entry, MAX_SECTIONS_PER_ADR),
+            DocType::Design => {
+                // Check if any ref has an anchor
+                let anchor = refs.iter().find_map(|r| r.target_anchor.as_deref());
+                select_sections_for_design(&target_path, entry, anchor, MAX_SECTIONS_PER_DESIGN)
+            }
+            DocType::Ops => select_sections_for_ops(&target_path, entry, MAX_SECTIONS_PER_OPS),
+            DocType::Other => select_sections_for_other(&target_path, entry),
+        };
+
+        // Apply per-doc token budget
+        let mut doc_tokens = 0;
+        let mut filtered_sections = Vec::new();
+
+        for section in doc_sections.drain(..) {
+            let section_tokens = estimate_tokens(&section.content);
+
+            if doc_tokens + section_tokens > MAX_TOKENS_PER_XREF_DOC {
+                break; // Exceeded per-doc limit
+            }
+
+            if remaining_budget < section_tokens {
+                break; // Exceeded global budget
+            }
+
+            doc_tokens += section_tokens;
+            remaining_budget -= section_tokens;
+            filtered_sections.push(section);
+        }
+
+        if !filtered_sections.is_empty() {
+            visited_docs.insert(target_path.clone());
+            xref_sections.extend(filtered_sections);
+        }
+    }
+
+    xref_sections
+}
+
 /// Main assemble command handler
 fn cmd_assemble(
     query: &str,
     max_tokens: usize,
     max_sections: usize,
-    _depth: usize, // TODO: implement cross-reference expansion
+    depth: usize,
     format: &str,
     index_dir: &Path,
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -1807,16 +2384,59 @@ fn cmd_assemble(
 
     let forward_index = load_forward_index(index_dir)?;
 
-    // Search for relevant sections
-    let sections = search_relevant_sections(query, &forward_index, max_sections);
+    // Phase 1: Primary section selection
+    let primary_sections = search_relevant_sections(query, &forward_index, max_sections);
 
-    if sections.is_empty() {
+    if primary_sections.is_empty() {
         println!("# No relevant sections found for query: \"{}\"", query);
         return Ok(());
     }
 
-    // Distill to markdown
-    let digest = distill_to_markdown(&sections, query, max_tokens);
+    let primary_tokens: usize = primary_sections
+        .iter()
+        .map(|s| estimate_tokens(&s.content))
+        .sum();
+
+    // Phase 2: Cross-reference expansion (if depth > 0)
+    let mut all_sections = primary_sections.clone();
+
+    if depth > 0 {
+        // Build ADR index
+        let adr_index = build_adr_index(&forward_index);
+
+        // Collect cross-references
+        let crossrefs = collect_crossrefs(&primary_sections, &adr_index);
+
+        // Calculate xref token budget
+        const XREF_TOKEN_FRACTION: f64 = 0.3;
+        const XREF_TOKEN_ABS_MAX: usize = 2000;
+
+        let xref_cap = ((max_tokens as f64 * XREF_TOKEN_FRACTION) as usize).min(XREF_TOKEN_ABS_MAX);
+        let remaining_tokens = max_tokens.saturating_sub(primary_tokens);
+        let xref_token_budget = remaining_tokens.min(xref_cap);
+
+        if xref_token_budget > 0 && !crossrefs.is_empty() {
+            // Get primary doc paths for deduplication
+            let primary_docs: HashSet<String> = primary_sections
+                .iter()
+                .map(|s| s.doc_path.clone())
+                .collect();
+
+            // Resolve cross-references
+            let xref_sections = resolve_crossrefs(
+                &crossrefs,
+                &primary_docs,
+                &forward_index,
+                xref_token_budget,
+            );
+
+            // Merge cross-ref sections
+            all_sections.extend(xref_sections);
+        }
+    }
+
+    // Phase 3: Distill to markdown
+    let digest = distill_to_markdown(&all_sections, query, max_tokens);
 
     println!("{}", digest);
 
