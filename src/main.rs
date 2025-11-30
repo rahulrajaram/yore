@@ -2369,6 +2369,263 @@ fn resolve_crossrefs(
     xref_sections
 }
 
+// ============================================================================
+// Extractive Refiner (Phase 2.3)
+// ============================================================================
+
+/// Split text into sentences using simple regex
+fn split_sentences(text: &str) -> Vec<String> {
+    // Preserve code blocks
+    let code_block_re = Regex::new(r"```[\s\S]*?```").unwrap();
+    let mut code_blocks = Vec::new();
+    let mut placeholder_text = text.to_string();
+
+    // Extract code blocks and replace with placeholders
+    for (i, caps) in code_block_re.captures_iter(text).enumerate() {
+        let code = caps.get(0).unwrap().as_str();
+        code_blocks.push(code.to_string());
+        placeholder_text = placeholder_text.replace(code, &format!("__CODE_BLOCK_{}__", i));
+    }
+
+    // Split on sentence boundaries: period/exclamation/question followed by space
+    // We'll use a simpler approach: split on these punctuation marks and then filter
+    let parts: Vec<&str> = placeholder_text.split(&['.', '!', '?']).collect();
+    let mut sentences = Vec::new();
+
+    for part in parts {
+        let trimmed = part.trim();
+        // Keep sentences that are substantial (>10 chars) and start with a letter/number
+        if trimmed.len() > 10 {
+            let first_char = trimmed.chars().next().unwrap_or(' ');
+            if first_char.is_alphanumeric() || first_char == '#' {
+                sentences.push(trimmed.to_string());
+            }
+        }
+    }
+
+    // Restore code blocks
+    for (i, code) in code_blocks.iter().enumerate() {
+        let placeholder = format!("__CODE_BLOCK_{}__", i);
+        for sentence in &mut sentences {
+            *sentence = sentence.replace(&placeholder, code);
+        }
+    }
+
+    sentences
+}
+
+/// Score a sentence for relevance
+fn score_sentence(
+    sentence: &str,
+    query_terms: &[String],
+    is_first: bool,
+    section_has_crossref: bool,
+) -> f64 {
+    let mut score = 0.0;
+
+    // Weight factors
+    const W_LEXICAL: f64 = 2.0;
+    const W_KEYWORD: f64 = 1.5;
+    const W_CODE: f64 = 3.0;
+    const W_FIRST: f64 = 0.3;
+    const W_CROSSREF: f64 = 1.0;
+
+    let sentence_lower = sentence.to_lowercase();
+
+    // 1. Lexical overlap with query
+    let mut overlap_count = 0;
+    for term in query_terms {
+        if sentence_lower.contains(&term.to_lowercase()) {
+            overlap_count += 1;
+        }
+    }
+    score += overlap_count as f64 * W_LEXICAL;
+
+    // 2. High-value keywords
+    let keywords = [
+        "deploy", "deployment", "restart", "auth", "authentication", "session", "state",
+        "error", "failure", "retry", "timeout", "architecture", "design", "decision",
+        "invariant", "must", "should", "requires", "context", "rationale", "consequence",
+        "kubernetes", "container", "pod", "service", "config", "configuration",
+        "security", "permission", "rbac", "policy", "test", "testing",
+    ];
+
+    for keyword in &keywords {
+        if sentence_lower.contains(keyword) {
+            score += W_KEYWORD;
+        }
+    }
+
+    // 3. Contains code or config
+    if sentence.contains("```") || sentence.contains("    ")
+        || sentence.contains("kubectl") || sentence.contains("docker")
+        || sentence.contains("make") || sentence.contains("cargo")
+        || sentence.contains("python") || sentence.contains("bash") {
+        score += W_CODE;
+    }
+
+    // 4. First sentence bias
+    if is_first {
+        score += W_FIRST;
+    }
+
+    // 5. Cross-reference bonus
+    if section_has_crossref {
+        if sentence_lower.contains("adr") || sentence_lower.contains("see ")
+            || sentence_lower.contains("refer") || sentence_lower.contains("described in") {
+            score += W_CROSSREF;
+        }
+    }
+
+    score
+}
+
+/// Extract heading from section text
+fn extract_heading(text: &str) -> (String, String) {
+    let lines: Vec<&str> = text.lines().collect();
+    if lines.is_empty() {
+        return (String::new(), String::new());
+    }
+
+    // Check if first line is a heading
+    let first_line = lines[0].trim();
+    if first_line.starts_with('#') {
+        let heading = first_line.to_string();
+        let body = lines[1..].join("\n");
+        (heading, body)
+    } else {
+        (String::new(), text.to_string())
+    }
+}
+
+/// Refine a single section by extracting high-signal sentences
+fn refine_section(
+    section: &SectionMatch,
+    query_terms: &[String],
+    max_tokens: usize,
+) -> SectionMatch {
+    let (heading, body) = extract_heading(&section.content);
+
+    // Extract code blocks - preserve them fully
+    let code_block_re = Regex::new(r"```[\s\S]*?```").unwrap();
+    let code_blocks: Vec<String> = code_block_re
+        .captures_iter(&body)
+        .map(|cap| cap.get(0).unwrap().as_str().to_string())
+        .collect();
+
+    // Extract lists - preserve them
+    let list_re = Regex::new(r"(?m)^[\s]*[-*+]\s+.+$").unwrap();
+    let list_items: Vec<String> = list_re
+        .captures_iter(&body)
+        .map(|cap| cap.get(0).unwrap().as_str().to_string())
+        .collect();
+
+    // Extract subheadings - preserve them
+    let subheading_re = Regex::new(r"(?m)^#{2,6}\s+.+$").unwrap();
+    let subheadings: Vec<String> = subheading_re
+        .captures_iter(&body)
+        .map(|cap| cap.get(0).unwrap().as_str().to_string())
+        .collect();
+
+    // Split into sentences
+    let sentences = split_sentences(&body);
+
+    if sentences.is_empty() {
+        return section.clone();
+    }
+
+    // Check if section has cross-references
+    let has_crossref = body.to_lowercase().contains("adr")
+        || body.contains("[") && body.contains("](");
+
+    // Score each sentence
+    let mut scored_sentences: Vec<(String, f64)> = sentences
+        .iter()
+        .enumerate()
+        .map(|(i, s)| {
+            let score = score_sentence(s, query_terms, i == 0, has_crossref);
+            (s.clone(), score)
+        })
+        .collect();
+
+    // Sort by score (descending)
+    scored_sentences.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+
+    // Keep top K sentences
+    let total_sentences = sentences.len();
+    let k = 6.max((total_sentences as f64 * 0.4).ceil() as usize);
+
+    let top_sentences: Vec<String> = scored_sentences
+        .iter()
+        .take(k)
+        .map(|(s, _)| s.clone())
+        .collect();
+
+    // Reconstruct section
+    let mut refined_parts = Vec::new();
+
+    // Add heading
+    if !heading.is_empty() {
+        refined_parts.push(heading.clone());
+    }
+
+    // Add preserved elements in order of appearance
+    let mut all_preserved = Vec::new();
+    all_preserved.extend(code_blocks);
+    all_preserved.extend(list_items);
+    all_preserved.extend(subheadings);
+
+    // Add top sentences
+    for sentence in &top_sentences {
+        refined_parts.push(sentence.clone());
+    }
+
+    // Add preserved elements
+    for item in &all_preserved {
+        if !refined_parts.iter().any(|p| p.contains(item)) {
+            refined_parts.push(item.clone());
+        }
+    }
+
+    let refined_text = refined_parts.join("\n\n");
+
+    // Trim to token budget if needed
+    let tokens = estimate_tokens(&refined_text);
+    let final_text = if tokens > max_tokens {
+        let char_limit = max_tokens * 4;
+        refined_text[..char_limit.min(refined_text.len())].to_string()
+    } else {
+        refined_text
+    };
+
+    SectionMatch {
+        doc_path: section.doc_path.clone(),
+        heading: section.heading.clone(),
+        line_start: section.line_start,
+        line_end: section.line_end,
+        bm25_score: section.bm25_score,
+        content: final_text,
+        canonicality: section.canonicality,
+    }
+}
+
+/// Apply extractive refinement to all sections
+fn apply_extractive_refiner(
+    sections: Vec<SectionMatch>,
+    query: &str,
+    max_tokens_per_section: usize,
+) -> Vec<SectionMatch> {
+    let query_terms: Vec<String> = query
+        .split_whitespace()
+        .map(|s| stem_word(&s.to_lowercase()))
+        .collect();
+
+    sections
+        .into_iter()
+        .map(|section| refine_section(&section, &query_terms, max_tokens_per_section))
+        .collect()
+}
+
 /// Main assemble command handler
 fn cmd_assemble(
     query: &str,
@@ -2435,8 +2692,12 @@ fn cmd_assemble(
         }
     }
 
-    // Phase 3: Distill to markdown
-    let digest = distill_to_markdown(&all_sections, query, max_tokens);
+    // Phase 3: Extractive refinement (increase signal density)
+    let max_tokens_per_section = max_tokens / all_sections.len().max(1);
+    let refined_sections = apply_extractive_refiner(all_sections, query, max_tokens_per_section);
+
+    // Phase 4: Distill to markdown
+    let digest = distill_to_markdown(&refined_sections, query, max_tokens);
 
     println!("{}", digest);
 
