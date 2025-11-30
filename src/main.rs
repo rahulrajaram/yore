@@ -161,6 +161,32 @@ enum Commands {
         #[arg(short, long, default_value = ".yore")]
         index: PathBuf,
     },
+
+    /// Assemble context digest for LLM consumption
+    Assemble {
+        /// Natural language query/question
+        query: Vec<String>,
+
+        /// Maximum tokens in output (approximate)
+        #[arg(short = 't', long, default_value = "8000")]
+        max_tokens: usize,
+
+        /// Maximum sections to include
+        #[arg(short = 's', long, default_value = "20")]
+        max_sections: usize,
+
+        /// Cross-reference expansion depth
+        #[arg(short = 'd', long, default_value = "1")]
+        depth: usize,
+
+        /// Output format
+        #[arg(short = 'f', long, default_value = "markdown")]
+        format: String,
+
+        /// Index directory
+        #[arg(short, long, default_value = ".yore")]
+        index: PathBuf,
+    },
 }
 
 // Index structures
@@ -267,6 +293,9 @@ fn main() {
         }
         Commands::Repl { index } => {
             cmd_repl(&index)
+        }
+        Commands::Assemble { query, max_tokens, max_sections, depth, format, index } => {
+            cmd_assemble(&query.join(" "), max_tokens, max_sections, depth, &format, &index)
         }
     };
 
@@ -1492,6 +1521,306 @@ fn chrono_now() -> String {
     use std::time::{SystemTime, UNIX_EPOCH};
     let duration = SystemTime::now().duration_since(UNIX_EPOCH).unwrap();
     format!("{}", duration.as_secs())
+}
+
+// ============================================================================
+// Context Assembly for LLMs (Phase 2)
+// ============================================================================
+
+#[derive(Debug, Clone)]
+struct SectionMatch {
+    doc_path: String,
+    heading: String,
+    line_start: usize,
+    line_end: usize,
+    bm25_score: f64,
+    content: String,
+    canonicality: f64,
+}
+
+/// Search for relevant sections using BM25 scoring
+fn search_relevant_sections(
+    query: &str,
+    index: &ForwardIndex,
+    max_sections: usize,
+) -> Vec<SectionMatch> {
+    let query_terms: Vec<String> = query
+        .split_whitespace()
+        .map(|s| stem_word(&s.to_lowercase()))
+        .collect();
+
+    let mut all_sections: Vec<SectionMatch> = Vec::new();
+
+    // First, get top documents by BM25
+    let mut doc_scores: Vec<(&String, &FileEntry, f64)> = index
+        .files
+        .iter()
+        .map(|(path, entry)| {
+            let score = bm25_score(&query_terms, entry, index.avg_doc_length, &index.idf_map);
+            (path, entry, score)
+        })
+        .filter(|(_, _, score)| *score > 0.01)
+        .collect();
+
+    doc_scores.sort_by(|a, b| b.2.partial_cmp(&a.2).unwrap_or(std::cmp::Ordering::Equal));
+
+    // Take top 20 documents
+    for (doc_path, entry, doc_score) in doc_scores.iter().take(20) {
+        let canonicality = score_canonicality(doc_path, entry);
+
+        // Split document into sections based on section_fingerprints
+        if !entry.section_fingerprints.is_empty() {
+            // Use indexed sections
+            for section in &entry.section_fingerprints {
+                // Read the actual section content
+                if let Ok(content) = fs::read_to_string(doc_path) {
+                    let lines: Vec<&str> = content.lines().collect();
+                    let start = section.line_start.saturating_sub(1);
+                    let end = section.line_end.min(lines.len());
+
+                    if start < end {
+                        let section_content = lines[start..end].join("\n");
+
+                        all_sections.push(SectionMatch {
+                            doc_path: doc_path.to_string(),
+                            heading: section.heading.clone(),
+                            line_start: section.line_start,
+                            line_end: section.line_end,
+                            bm25_score: *doc_score, // Use doc-level score for now
+                            content: section_content,
+                            canonicality,
+                        });
+                    }
+                }
+            }
+        } else {
+            // Fallback: treat whole doc as one section
+            if let Ok(content) = fs::read_to_string(doc_path) {
+                all_sections.push(SectionMatch {
+                    doc_path: doc_path.to_string(),
+                    heading: "Full Document".to_string(),
+                    line_start: 1,
+                    line_end: content.lines().count(),
+                    bm25_score: *doc_score,
+                    content,
+                    canonicality,
+                });
+            }
+        }
+    }
+
+    // Sort by combined score: BM25 * 0.7 + canonicality * 0.3
+    all_sections.sort_by(|a, b| {
+        let score_a = a.bm25_score * 0.7 + a.canonicality * 0.3;
+        let score_b = b.bm25_score * 0.7 + b.canonicality * 0.3;
+        score_b.partial_cmp(&score_a).unwrap_or(std::cmp::Ordering::Equal)
+    });
+
+    // Take top N sections
+    all_sections.into_iter().take(max_sections).collect()
+}
+
+/// Score document canonicality based on path, recency, and patterns
+fn score_canonicality(doc_path: &str, entry: &FileEntry) -> f64 {
+    let mut score: f64 = 0.5; // baseline
+
+    let path_lower = doc_path.to_lowercase();
+
+    // Path-based boosts
+    if path_lower.contains("docs/adr/") || path_lower.contains("docs/architecture/") {
+        score += 0.2;
+    }
+    if path_lower.contains("docs/index/") {
+        score += 0.15;
+    }
+    if path_lower.contains("scratch") || path_lower.contains("archive") || path_lower.contains("old") {
+        score -= 0.3;
+    }
+    if path_lower.contains("deprecated") || path_lower.contains("backup") {
+        score -= 0.25;
+    }
+
+    // Filename patterns
+    let filename = Path::new(doc_path)
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or("")
+        .to_lowercase();
+
+    if filename.contains("readme") || filename.contains("index") {
+        score += 0.1;
+    }
+    if filename.contains("guide") || filename.contains("runbook") || filename.contains("plan") {
+        score += 0.1;
+    }
+
+    // Recency (approximate - we don't have mtime in index yet)
+    // For now, we'll just use this as a placeholder
+    // In future: add last_modified to FileEntry
+
+    // Clamp to [0.0, 1.0]
+    score.max(0.0).min(1.0)
+}
+
+/// Distill sections into markdown digest within token budget
+fn distill_to_markdown(
+    sections: &[SectionMatch],
+    query: &str,
+    max_tokens: usize,
+) -> String {
+    let mut output = String::new();
+    let mut used_tokens = 0;
+
+    // Header
+    let header = format!(
+        "# Context Digest for: \"{}\"\n\n\
+         **Generated:** {}\n\
+         **Token Budget:** {}\n\
+         **Documents Scanned:** N/A\n\
+         **Sections Selected:** {}\n\n\
+         ---\n\n",
+        query,
+        chrono_now(),
+        max_tokens,
+        sections.len()
+    );
+    output.push_str(&header);
+    used_tokens += estimate_tokens(&header);
+
+    // Group sections by document
+    let mut doc_groups: HashMap<String, Vec<&SectionMatch>> = HashMap::new();
+    for section in sections {
+        doc_groups
+            .entry(section.doc_path.clone())
+            .or_insert_with(Vec::new)
+            .push(section);
+    }
+
+    // Top Relevant Documents section
+    output.push_str("## Top Relevant Documents\n\n");
+    used_tokens += 10;
+
+    let mut ranked_docs: Vec<_> = doc_groups.iter().collect();
+    ranked_docs.sort_by(|a, b| {
+        let score_a = a.1[0].bm25_score * 0.7 + a.1[0].canonicality * 0.3;
+        let score_b = b.1[0].bm25_score * 0.7 + b.1[0].canonicality * 0.3;
+        score_b.partial_cmp(&score_a).unwrap_or(std::cmp::Ordering::Equal)
+    });
+
+    for (idx, (doc_path, doc_sections)) in ranked_docs.iter().enumerate().take(10) {
+        let section = doc_sections[0];
+        let combined_score = section.bm25_score * 0.7 + section.canonicality * 0.3;
+        let doc_line = format!(
+            "{}. **{}** (score: {:.2}, canonical: {:.2})\n   - Sections included: {}\n\n",
+            idx + 1,
+            doc_path,
+            combined_score,
+            section.canonicality,
+            doc_sections.len()
+        );
+        output.push_str(&doc_line);
+        used_tokens += estimate_tokens(&doc_line);
+    }
+
+    output.push_str("---\n\n## Distilled Content\n\n");
+    used_tokens += 10;
+
+    // Add sections
+    for section in sections {
+        if used_tokens >= max_tokens {
+            output.push_str("\n\n*[Content truncated due to token budget]*\n");
+            break;
+        }
+
+        let section_header = format!(
+            "### {} (from {})\n\n**Source:** {}:{}-{} (canonical: {:.2})\n\n",
+            section.heading,
+            section.doc_path,
+            section.doc_path,
+            section.line_start,
+            section.line_end,
+            section.canonicality
+        );
+
+        // Estimate how much space we need
+        let section_tokens = estimate_tokens(&section_header) + estimate_tokens(&section.content);
+
+        if used_tokens + section_tokens > max_tokens {
+            // Try to fit a truncated version
+            let remaining_tokens = max_tokens - used_tokens;
+            let chars_to_include = remaining_tokens * 4; // rough approximation
+
+            if chars_to_include > 200 {
+                output.push_str(&section_header);
+                output.push_str(&section.content[..chars_to_include.min(section.content.len())]);
+                output.push_str("\n\n*[Section truncated]*\n");
+            }
+            break;
+        }
+
+        output.push_str(&section_header);
+        output.push_str(&section.content);
+        output.push_str("\n\n---\n\n");
+
+        used_tokens += section_tokens;
+    }
+
+    // Metadata footer
+    let footer = format!(
+        "\n## Metadata\n\n\
+         **Canonicality Scores:**\n\
+         - 0.90+: Authoritative source, prefer over other docs\n\
+         - 0.70-0.89: Reliable, current documentation\n\
+         - 0.50-0.69: Secondary or supporting documentation\n\
+         - <0.50: Potentially stale, use with caution\n\n\
+         **Actual Tokens Used:** ~{}\n\n\
+         ---\n\n\
+         ## Usage with LLM\n\n\
+         Paste this digest into your LLM conversation, then ask:\n\n\
+         > Using only the information in the context above, answer: \"{}\"\n\
+         > Be explicit when something is not documented in the context.\n",
+        used_tokens, query
+    );
+
+    output.push_str(&footer);
+
+    output
+}
+
+/// Estimate token count (rough approximation: 1 token ≈ 4 chars)
+fn estimate_tokens(text: &str) -> usize {
+    text.len() / 4
+}
+
+/// Main assemble command handler
+fn cmd_assemble(
+    query: &str,
+    max_tokens: usize,
+    max_sections: usize,
+    _depth: usize, // TODO: implement cross-reference expansion
+    format: &str,
+    index_dir: &Path,
+) -> Result<(), Box<dyn std::error::Error>> {
+    if format != "markdown" {
+        return Err("Only markdown format is supported currently".into());
+    }
+
+    let forward_index = load_forward_index(index_dir)?;
+
+    // Search for relevant sections
+    let sections = search_relevant_sections(query, &forward_index, max_sections);
+
+    if sections.is_empty() {
+        println!("# No relevant sections found for query: \"{}\"", query);
+        return Ok(());
+    }
+
+    // Distill to markdown
+    let digest = distill_to_markdown(&sections, query, max_tokens);
+
+    println!("{}", digest);
+
+    Ok(())
 }
 
 #[cfg(test)]
