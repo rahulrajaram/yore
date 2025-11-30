@@ -191,7 +191,7 @@ enum Commands {
     /// Evaluate retrieval pipeline against test questions
     Eval {
         /// Path to questions JSONL file
-        #[arg(short, long, default_value = "evaluation/questions.jsonl")]
+        #[arg(short, long, default_value = "questions.jsonl")]
         questions: PathBuf,
 
         /// Index directory
@@ -350,17 +350,17 @@ struct FileEntry {
     line_count: usize,
     headings: Vec<Heading>,
     keywords: Vec<String>,
-    body_keywords: Vec<String>,  // keywords from full text
+    body_keywords: Vec<String>, // keywords from full text
     links: Vec<Link>,
-    simhash: u64,  // content fingerprint
+    simhash: u64, // content fingerprint
     #[serde(default)]
-    term_frequencies: HashMap<String, usize>,  // term counts for BM25
+    term_frequencies: HashMap<String, usize>, // term counts for BM25
     #[serde(default)]
-    doc_length: usize,  // total terms for BM25
+    doc_length: usize, // total terms for BM25
     #[serde(default)]
-    minhash: Vec<u64>,  // MinHash signature for LSH
+    minhash: Vec<u64>, // MinHash signature for LSH
     #[serde(default)]
-    section_fingerprints: Vec<SectionFingerprint>,  // NEW: section-level SimHash
+    section_fingerprints: Vec<SectionFingerprint>, // NEW: section-level SimHash
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -398,11 +398,11 @@ struct ReverseEntry {
 struct ForwardIndex {
     files: HashMap<String, FileEntry>,
     indexed_at: String,
-    version: u32,  // index version for compatibility
+    version: u32, // index version for compatibility
     #[serde(default)]
-    avg_doc_length: f64,  // NEW: average document length for BM25
+    avg_doc_length: f64, // NEW: average document length for BM25
     #[serde(default)]
-    idf_map: HashMap<String, f64>,  // NEW: IDF scores for BM25
+    idf_map: HashMap<String, f64>, // NEW: IDF scores for BM25
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -423,48 +423,78 @@ fn main() {
     let cli = Cli::parse();
 
     let result = match cli.command {
-        Commands::Build { path, output, types, exclude } => {
-            cmd_build(&path, &output, &types, &exclude, cli.quiet)
-        }
-        Commands::Query { terms, limit, files_only, json, index } => {
-            cmd_query(&terms, limit, files_only, json, &index)
-        }
-        Commands::Similar { file, limit, threshold, json, index } => {
-            cmd_similar(&file, limit, threshold, json, &index)
-        }
-        Commands::Dupes { threshold, group, json, index } => {
-            cmd_dupes(threshold, group, json, &index)
-        }
-        Commands::DupesSections { threshold, min_files, json, index } => {
-            cmd_dupes_sections(threshold, min_files, json, &index)
-        }
-        Commands::Diff { file1, file2, index } => {
-            cmd_diff(&file1, &file2, &index)
-        }
-        Commands::Stats { top_keywords, index } => {
-            cmd_stats(top_keywords, &index)
-        }
-        Commands::Repl { index } => {
-            cmd_repl(&index)
-        }
-        Commands::Assemble { query, max_tokens, max_sections, depth, format, index } => {
-            cmd_assemble(&query.join(" "), max_tokens, max_sections, depth, &format, &index)
-        }
-        Commands::Eval { questions, index } => {
-            cmd_eval(&questions, &index)
-        }
+        Commands::Build {
+            path,
+            output,
+            types,
+            exclude,
+        } => cmd_build(&path, &output, &types, &exclude, cli.quiet),
+        Commands::Query {
+            terms,
+            limit,
+            files_only,
+            json,
+            index,
+        } => cmd_query(&terms, limit, files_only, json, &index),
+        Commands::Similar {
+            file,
+            limit,
+            threshold,
+            json,
+            index,
+        } => cmd_similar(&file, limit, threshold, json, &index),
+        Commands::Dupes {
+            threshold,
+            group,
+            json,
+            index,
+        } => cmd_dupes(threshold, group, json, &index),
+        Commands::DupesSections {
+            threshold,
+            min_files,
+            json,
+            index,
+        } => cmd_dupes_sections(threshold, min_files, json, &index),
+        Commands::Diff {
+            file1,
+            file2,
+            index,
+        } => cmd_diff(&file1, &file2, &index),
+        Commands::Stats {
+            top_keywords,
+            index,
+        } => cmd_stats(top_keywords, &index),
+        Commands::Repl { index } => cmd_repl(&index),
+        Commands::Assemble {
+            query,
+            max_tokens,
+            max_sections,
+            depth,
+            format,
+            index,
+        } => cmd_assemble(
+            &query.join(" "),
+            max_tokens,
+            max_sections,
+            depth,
+            &format,
+            &index,
+        ),
+        Commands::Eval { questions, index } => cmd_eval(&questions, &index),
         Commands::CheckLinks { index, json, root } => {
             cmd_check_links(&index, json, root.as_deref())
         }
-        Commands::Backlinks { file, index, json } => {
-            cmd_backlinks(&file, &index, json)
-        }
-        Commands::Orphans { index, json, exclude } => {
-            cmd_orphans(&index, json, &exclude)
-        }
-        Commands::Canonicality { index, json, threshold } => {
-            cmd_canonicality(&index, json, threshold)
-        }
+        Commands::Backlinks { file, index, json } => cmd_backlinks(&file, &index, json),
+        Commands::Orphans {
+            index,
+            json,
+            exclude,
+        } => cmd_orphans(&index, json, &exclude),
+        Commands::Canonicality {
+            index,
+            json,
+            threshold,
+        } => cmd_canonicality(&index, json, threshold),
     };
 
     if let Err(e) = result {
@@ -502,7 +532,7 @@ fn cmd_build(
     let mut forward_index = ForwardIndex {
         files: HashMap::new(),
         indexed_at: chrono_now(),
-        version: 3,  // Version 3 includes BM25 (term_frequencies, idf_map) and MinHash
+        version: 3, // Version 3 includes BM25 (term_frequencies, idf_map) and MinHash
         avg_doc_length: 0.0,
         idf_map: HashMap::new(),
     };
@@ -524,7 +554,8 @@ fn cmd_build(
         }
 
         // Check extension
-        let ext = path.extension()
+        let ext = path
+            .extension()
             .and_then(|e| e.to_str())
             .map(|e| e.to_lowercase())
             .unwrap_or_default();
@@ -547,7 +578,8 @@ fn cmd_build(
 
         // Index the file
         if let Ok(entry) = index_file(path) {
-            let rel_path = path.strip_prefix(std::env::current_dir()?)
+            let rel_path = path
+                .strip_prefix(std::env::current_dir()?)
                 .unwrap_or(path)
                 .to_string_lossy()
                 .to_string();
@@ -555,9 +587,10 @@ fn cmd_build(
             // Update reverse index with heading keywords
             for keyword in &entry.keywords {
                 let stemmed = stem_word(&keyword.to_lowercase());
-                reverse_index.keywords
+                reverse_index
+                    .keywords
                     .entry(stemmed)
-                    .or_insert_with(Vec::new)
+                    .or_default()
                     .push(ReverseEntry {
                         file: rel_path.clone(),
                         line: None,
@@ -569,9 +602,10 @@ fn cmd_build(
             // Update reverse index with body keywords
             for keyword in &entry.body_keywords {
                 let stemmed = stem_word(&keyword.to_lowercase());
-                reverse_index.keywords
+                reverse_index
+                    .keywords
                     .entry(stemmed)
-                    .or_insert_with(Vec::new)
+                    .or_default()
                     .push(ReverseEntry {
                         file: rel_path.clone(),
                         line: None,
@@ -584,9 +618,10 @@ fn cmd_build(
                 let words = extract_keywords(&heading.text);
                 for word in words {
                     let stemmed = stem_word(&word.to_lowercase());
-                    reverse_index.keywords
+                    reverse_index
+                        .keywords
                         .entry(stemmed)
-                        .or_insert_with(Vec::new)
+                        .or_default()
                         .push(ReverseEntry {
                             file: rel_path.clone(),
                             line: Some(heading.line),
@@ -657,12 +692,19 @@ fn cmd_build(
         println!();
         println!("{}", "Index Statistics".green().bold());
         println!("  Files indexed:    {}", file_count.to_string().cyan());
-        println!("  Unique keywords:  {}", reverse_index.keywords.len().to_string().cyan());
+        println!(
+            "  Unique keywords:  {}",
+            reverse_index.keywords.len().to_string().cyan()
+        );
         println!("  Total headings:   {}", total_headings.to_string().cyan());
         println!("  Total links:      {}", total_links.to_string().cyan());
         println!("  Time elapsed:     {:.2?}", elapsed);
         println!();
-        println!("{} {}", "Indexes written to".green(), output.display().to_string().cyan());
+        println!(
+            "{} {}",
+            "Indexes written to".green(),
+            output.display().to_string().cyan()
+        );
     }
 
     Ok(())
@@ -684,7 +726,10 @@ fn index_file(path: &Path) -> Result<FileEntry, Box<dyn std::error::Error>> {
             headings.push(Heading {
                 line: i + 1,
                 level: caps.get(1).map(|m| m.as_str().len()).unwrap_or(1),
-                text: caps.get(2).map(|m| m.as_str().to_string()).unwrap_or_default(),
+                text: caps
+                    .get(2)
+                    .map(|m| m.as_str().to_string())
+                    .unwrap_or_default(),
             });
         }
     }
@@ -697,8 +742,14 @@ fn index_file(path: &Path) -> Result<FileEntry, Box<dyn std::error::Error>> {
         for caps in link_re.captures_iter(line) {
             links.push(Link {
                 line: i + 1,
-                text: caps.get(1).map(|m| m.as_str().to_string()).unwrap_or_default(),
-                target: caps.get(2).map(|m| m.as_str().to_string()).unwrap_or_default(),
+                text: caps
+                    .get(1)
+                    .map(|m| m.as_str().to_string())
+                    .unwrap_or_default(),
+                target: caps
+                    .get(2)
+                    .map(|m| m.as_str().to_string())
+                    .unwrap_or_default(),
             });
         }
     }
@@ -745,7 +796,8 @@ fn index_file(path: &Path) -> Result<FileEntry, Box<dyn std::error::Error>> {
     }
 
     // NEW: Compute MinHash signature
-    let all_keywords: Vec<String> = keywords.iter()
+    let all_keywords: Vec<String> = keywords
+        .iter()
         .chain(body_keywords.iter())
         .cloned()
         .collect();
@@ -775,22 +827,23 @@ fn index_file(path: &Path) -> Result<FileEntry, Box<dyn std::error::Error>> {
 
 fn extract_keywords(text: &str) -> Vec<String> {
     let stop_words: HashSet<&str> = [
-        "a", "an", "the", "and", "or", "but", "in", "on", "at", "to", "for",
-        "of", "with", "by", "from", "as", "is", "was", "are", "were", "been",
-        "be", "have", "has", "had", "do", "does", "did", "will", "would",
-        "could", "should", "may", "might", "must", "shall", "can", "need",
-        "this", "that", "these", "those", "i", "you", "he", "she", "it",
-        "we", "they", "what", "which", "who", "whom", "whose", "where",
-        "when", "why", "how", "all", "each", "every", "both", "few", "more",
-        "most", "other", "some", "such", "no", "nor", "not", "only", "own",
-        "same", "so", "than", "too", "very", "just", "also", "now", "here",
-        "using", "used", "use", "new", "first", "last", "next", "then",
-        "see", "get", "set", "run", "add", "create", "update", "delete",
-    ].into_iter().collect();
+        "a", "an", "the", "and", "or", "but", "in", "on", "at", "to", "for", "of", "with", "by",
+        "from", "as", "is", "was", "are", "were", "been", "be", "have", "has", "had", "do", "does",
+        "did", "will", "would", "could", "should", "may", "might", "must", "shall", "can", "need",
+        "this", "that", "these", "those", "i", "you", "he", "she", "it", "we", "they", "what",
+        "which", "who", "whom", "whose", "where", "when", "why", "how", "all", "each", "every",
+        "both", "few", "more", "most", "other", "some", "such", "no", "nor", "not", "only", "own",
+        "same", "so", "than", "too", "very", "just", "also", "now", "here", "using", "used", "use",
+        "new", "first", "last", "next", "then", "see", "get", "set", "run", "add", "create",
+        "update", "delete",
+    ]
+    .into_iter()
+    .collect();
 
     let word_re = Regex::new(r"[a-zA-Z][a-zA-Z0-9_-]*").unwrap();
 
-    word_re.find_iter(text)
+    word_re
+        .find_iter(text)
         .map(|m| m.as_str().to_lowercase())
         .filter(|w| w.len() >= 3 && !stop_words.contains(w.as_str()))
         .collect()
@@ -802,10 +855,9 @@ fn stem_word(word: &str) -> String {
 
     // Common suffixes to strip
     let suffixes = [
-        "ization", "ational", "iveness", "fulness", "ousness",
-        "ation", "ement", "ment", "able", "ible", "ness", "ical",
-        "ings", "ing", "ies", "ive", "ful", "ous", "ity",
-        "ed", "ly", "er", "es", "s",
+        "ization", "ational", "iveness", "fulness", "ousness", "ation", "ement", "ment", "able",
+        "ible", "ness", "ical", "ings", "ing", "ies", "ive", "ful", "ous", "ity", "ed", "ly", "er",
+        "es", "s",
     ];
 
     for suffix in suffixes {
@@ -828,19 +880,19 @@ fn compute_simhash(content: &str) -> u64 {
         let shingle = format!("{} {} {}", window[0], window[1], window[2]);
         let h = hash_string(&shingle);
 
-        for i in 0..64 {
+        for (i, item) in v.iter_mut().enumerate() {
             if (h >> i) & 1 == 1 {
-                v[i] += 1;
+                *item += 1;
             } else {
-                v[i] -= 1;
+                *item -= 1;
             }
         }
     }
 
     // Convert to fingerprint
     let mut fingerprint: u64 = 0;
-    for i in 0..64 {
-        if v[i] > 0 {
+    for (i, item) in v.iter().enumerate() {
+        if *item > 0 {
             fingerprint |= 1 << i;
         }
     }
@@ -877,7 +929,8 @@ fn index_sections(content: &str, headings: &[Heading]) -> Vec<SectionFingerprint
 
     for i in 0..headings.len() {
         let start = headings[i].line.saturating_sub(1);
-        let end = headings.get(i + 1)
+        let end = headings
+            .get(i + 1)
             .map(|h| h.line.saturating_sub(1))
             .unwrap_or(lines.len());
 
@@ -901,13 +954,13 @@ fn compute_minhash(keywords: &[String], num_hashes: usize) -> Vec<u64> {
     let mut hashes = vec![u64::MAX; num_hashes];
 
     for keyword in keywords {
-        for i in 0..num_hashes {
+        for (i, hash_slot) in hashes.iter_mut().enumerate().take(num_hashes) {
             let mut hasher = AHasher::default();
             keyword.hash(&mut hasher);
             i.hash(&mut hasher); // Use index as seed
             let h = hasher.finish();
 
-            hashes[i] = hashes[i].min(h);
+            *hash_slot = (*hash_slot).min(h);
         }
     }
 
@@ -920,10 +973,7 @@ fn minhash_similarity(a: &[u64], b: &[u64]) -> f64 {
         return 0.0;
     }
 
-    let matches = a.iter()
-        .zip(b.iter())
-        .filter(|(x, y)| x == y)
-        .count();
+    let matches = a.iter().zip(b.iter()).filter(|(x, y)| x == y).count();
 
     matches as f64 / a.len() as f64
 }
@@ -959,10 +1009,7 @@ fn bm25_score(
 }
 
 /// Build LSH buckets for fast duplicate detection
-fn lsh_buckets(
-    files: &HashMap<String, FileEntry>,
-    bands: usize,
-) -> HashMap<u64, Vec<String>> {
+fn lsh_buckets(files: &HashMap<String, FileEntry>, bands: usize) -> HashMap<u64, Vec<String>> {
     let rows_per_band = 128 / bands; // Assuming 128 hashes
     let mut buckets: HashMap<u64, Vec<String>> = HashMap::new();
 
@@ -982,9 +1029,7 @@ fn lsh_buckets(
             }
             let band_hash = hasher.finish();
 
-            buckets.entry(band_hash)
-                .or_insert_with(Vec::new)
-                .push(path.clone());
+            buckets.entry(band_hash).or_default().push(path.clone());
         }
     }
 
@@ -1002,9 +1047,16 @@ fn cmd_query(
     let forward_index = load_forward_index(index_dir)?;
 
     // Compute BM25 scores for all documents
-    let mut file_scores: Vec<(String, f64)> = forward_index.files.iter()
+    let mut file_scores: Vec<(String, f64)> = forward_index
+        .files
+        .iter()
         .map(|(path, entry)| {
-            let score = bm25_score(terms, entry, forward_index.avg_doc_length, &forward_index.idf_map);
+            let score = bm25_score(
+                terms,
+                entry,
+                forward_index.avg_doc_length,
+                &forward_index.idf_map,
+            );
             (path.clone(), score)
         })
         .filter(|(_, score)| *score > 0.0)
@@ -1026,7 +1078,8 @@ fn cmd_query(
         return Ok(());
     }
 
-    println!("{} results for: {}\n",
+    println!(
+        "{} results for: {}\n",
         results.len().to_string().green().bold(),
         terms.join(" ").cyan()
     );
@@ -1040,17 +1093,19 @@ fn cmd_query(
             // Show matching headings
             if let Some(entry) = forward_index.files.get(&file) {
                 for heading in entry.headings.iter().take(3) {
-                    let heading_keywords: HashSet<String> =
-                        extract_keywords(&heading.text).into_iter()
-                            .map(|k| stem_word(&k))
-                            .collect();
+                    let heading_keywords: HashSet<String> = extract_keywords(&heading.text)
+                        .into_iter()
+                        .map(|k| stem_word(&k))
+                        .collect();
 
-                    let matches: Vec<_> = terms.iter()
+                    let matches: Vec<_> = terms
+                        .iter()
                         .filter(|t| heading_keywords.contains(&stem_word(&t.to_lowercase())))
                         .collect();
 
                     if !matches.is_empty() {
-                        println!("  {} L{}: {}",
+                        println!(
+                            "  {} L{}: {}",
                             ">".dimmed(),
                             heading.line.to_string().dimmed(),
                             heading.text
@@ -1079,27 +1134,43 @@ fn cmd_similar(
     let file_with_dot = format!("./{}", file_str.trim_start_matches("./"));
     let file_without_dot = file_str.trim_start_matches("./").to_string();
 
-    let (matched_path, ref_entry) = forward_index.files.get(&file_str)
+    let (matched_path, ref_entry) = forward_index
+        .files
+        .get(&file_str)
         .map(|e| (file_str.clone(), e))
-        .or_else(|| forward_index.files.get(&file_with_dot).map(|e| (file_with_dot.clone(), e)))
-        .or_else(|| forward_index.files.get(&file_without_dot).map(|e| (file_without_dot.clone(), e)))
+        .or_else(|| {
+            forward_index
+                .files
+                .get(&file_with_dot)
+                .map(|e| (file_with_dot.clone(), e))
+        })
+        .or_else(|| {
+            forward_index
+                .files
+                .get(&file_without_dot)
+                .map(|e| (file_without_dot.clone(), e))
+        })
         .ok_or_else(|| format!("File not in index: {}", file_str))?;
 
     // Combine heading and body keywords
-    let ref_keywords: HashSet<String> = ref_entry.keywords.iter()
+    let ref_keywords: HashSet<String> = ref_entry
+        .keywords
+        .iter()
         .chain(ref_entry.body_keywords.iter())
         .map(|k| k.to_lowercase())
         .collect();
 
     // Compare with all other files using both Jaccard and Simhash
-    let mut similarities: Vec<(String, f64, f64, f64)> = Vec::new();  // (path, jaccard, simhash, combined)
+    let mut similarities: Vec<(String, f64, f64, f64)> = Vec::new(); // (path, jaccard, simhash, combined)
 
     for (path, entry) in &forward_index.files {
         if path == &matched_path {
             continue;
         }
 
-        let other_keywords: HashSet<String> = entry.keywords.iter()
+        let other_keywords: HashSet<String> = entry
+            .keywords
+            .iter()
             .chain(entry.body_keywords.iter())
             .map(|k| k.to_lowercase())
             .collect();
@@ -1120,13 +1191,16 @@ fn cmd_similar(
     similarities.truncate(limit);
 
     if json {
-        let output: Vec<_> = similarities.iter()
-            .map(|(p, j, s, c)| serde_json::json!({
-                "path": p,
-                "jaccard": j,
-                "simhash": s,
-                "combined": c
-            }))
+        let output: Vec<_> = similarities
+            .iter()
+            .map(|(p, j, s, c)| {
+                serde_json::json!({
+                    "path": p,
+                    "jaccard": j,
+                    "simhash": s,
+                    "combined": c
+                })
+            })
             .collect();
         println!("{}", serde_json::to_string_pretty(&output)?);
         return Ok(());
@@ -1138,14 +1212,15 @@ fn cmd_similar(
     }
 
     println!("Files similar to: {}\n", matched_path.cyan());
-    println!("{:>5} {:>5} {:>5}  {}", "Comb", "Jacc", "Sim", "Path");
+    println!("{:>5} {:>5} {:>5}  Path", "Comb", "Jacc", "Sim");
     println!("{}", "-".repeat(60));
 
     for (path, jaccard, simhash_sim, combined) in similarities {
         let comb_pct = (combined * 100.0) as u32;
         let jacc_pct = (jaccard * 100.0) as u32;
         let sim_pct = (simhash_sim * 100.0) as u32;
-        println!("{:>4}% {:>4}% {:>4}%  {}",
+        println!(
+            "{:>4}% {:>4}% {:>4}%  {}",
             comb_pct.to_string().green(),
             jacc_pct.to_string().cyan(),
             sim_pct.to_string().yellow(),
@@ -1185,16 +1260,23 @@ fn cmd_dupes(
         }
     }
 
-    let mut duplicates: Vec<(String, String, f64, f64, f64, f64)> = Vec::new();  // (path1, path2, jaccard, simhash, minhash, combined)
+    let mut duplicates: Vec<(String, String, f64, f64, f64, f64)> = Vec::new(); // (path1, path2, jaccard, simhash, minhash, combined)
 
     // Compare candidate pairs
     for (path1, path2) in &candidates {
-        if let (Some(entry1), Some(entry2)) = (forward_index.files.get(path1), forward_index.files.get(path2)) {
-            let kw1: HashSet<String> = entry1.keywords.iter()
+        if let (Some(entry1), Some(entry2)) = (
+            forward_index.files.get(path1),
+            forward_index.files.get(path2),
+        ) {
+            let kw1: HashSet<String> = entry1
+                .keywords
+                .iter()
                 .chain(entry1.body_keywords.iter())
                 .map(|k| k.to_lowercase())
                 .collect();
-            let kw2: HashSet<String> = entry2.keywords.iter()
+            let kw2: HashSet<String> = entry2
+                .keywords
+                .iter()
                 .chain(entry2.body_keywords.iter())
                 .map(|k| k.to_lowercase())
                 .collect();
@@ -1205,7 +1287,14 @@ fn cmd_dupes(
             let combined = jaccard * 0.4 + simhash_sim * 0.3 + minhash_sim * 0.3;
 
             if combined >= threshold {
-                duplicates.push((path1.clone(), path2.clone(), jaccard, simhash_sim, minhash_sim, combined));
+                duplicates.push((
+                    path1.clone(),
+                    path2.clone(),
+                    jaccard,
+                    simhash_sim,
+                    minhash_sim,
+                    combined,
+                ));
             }
         }
     }
@@ -1216,15 +1305,18 @@ fn cmd_dupes(
     duplicates.sort_by(|a, b| b.5.partial_cmp(&a.5).unwrap_or(std::cmp::Ordering::Equal));
 
     if json {
-        let output: Vec<_> = duplicates.iter()
-            .map(|(p1, p2, j, s, m, c)| serde_json::json!({
-                "file1": p1,
-                "file2": p2,
-                "jaccard": j,
-                "simhash": s,
-                "minhash": m,
-                "combined": c
-            }))
+        let output: Vec<_> = duplicates
+            .iter()
+            .map(|(p1, p2, j, s, m, c)| {
+                serde_json::json!({
+                    "file1": p1,
+                    "file2": p2,
+                    "jaccard": j,
+                    "simhash": s,
+                    "minhash": m,
+                    "combined": c
+                })
+            })
             .collect();
         println!("{}", serde_json::to_string_pretty(&output)?);
         return Ok(());
@@ -1232,7 +1324,8 @@ fn cmd_dupes(
 
     if duplicates.is_empty() {
         println!("{}", "No duplicates found above threshold.".green());
-        eprintln!("LSH duplicate detection: {:?} ({} candidate pairs from {} buckets)",
+        eprintln!(
+            "LSH duplicate detection: {:?} ({} candidate pairs from {} buckets)",
             elapsed,
             candidates.len(),
             buckets.len()
@@ -1240,11 +1333,13 @@ fn cmd_dupes(
         return Ok(());
     }
 
-    println!("{} duplicate pairs found (threshold: {}%)",
+    println!(
+        "{} duplicate pairs found (threshold: {}%)",
         duplicates.len().to_string().yellow().bold(),
         (threshold * 100.0) as u32
     );
-    eprintln!("LSH duplicate detection: {:?} ({} candidates from {} buckets)\n",
+    eprintln!(
+        "LSH duplicate detection: {:?} ({} candidates from {} buckets)\n",
         elapsed,
         candidates.len(),
         buckets.len()
@@ -1255,7 +1350,7 @@ fn cmd_dupes(
         let mut groups: HashMap<String, Vec<(String, f64)>> = HashMap::new();
 
         for (path1, path2, _, _, _, combined) in &duplicates {
-            let group = groups.entry(path1.clone()).or_insert_with(Vec::new);
+            let group = groups.entry(path1.clone()).or_default();
             if !group.iter().any(|(p, _)| p == path2) {
                 group.push((path2.clone(), *combined));
             }
@@ -1269,9 +1364,12 @@ fn cmd_dupes(
             println!();
         }
     } else {
-        for (path1, path2, jaccard, simhash_sim, minhash_sim, combined) in duplicates.iter().take(50) {
+        for (path1, path2, jaccard, simhash_sim, minhash_sim, combined) in
+            duplicates.iter().take(50)
+        {
             let comb_pct = (combined * 100.0) as u32;
-            println!("{}% [J:{}% S:{}% M:{}%] {} <-> {}",
+            println!(
+                "{}% [J:{}% S:{}% M:{}%] {} <-> {}",
                 comb_pct.to_string().yellow(),
                 (jaccard * 100.0) as u32,
                 (simhash_sim * 100.0) as u32,
@@ -1282,7 +1380,10 @@ fn cmd_dupes(
         }
 
         if duplicates.len() > 50 {
-            println!("\n{}", format!("... and {} more", duplicates.len() - 50).dimmed());
+            println!(
+                "\n{}",
+                format!("... and {} more", duplicates.len() - 50).dimmed()
+            );
         }
     }
 
@@ -1303,22 +1404,39 @@ fn cmd_diff(
         let with_dot = format!("./{}", s.trim_start_matches("./"));
         let without_dot = s.trim_start_matches("./").to_string();
 
-        forward_index.files.get(&s).map(|e| (s.clone(), e))
-            .or_else(|| forward_index.files.get(&with_dot).map(|e| (with_dot.clone(), e)))
-            .or_else(|| forward_index.files.get(&without_dot).map(|e| (without_dot, e)))
+        forward_index
+            .files
+            .get(&s)
+            .map(|e| (s.clone(), e))
+            .or_else(|| {
+                forward_index
+                    .files
+                    .get(&with_dot)
+                    .map(|e| (with_dot.clone(), e))
+            })
+            .or_else(|| {
+                forward_index
+                    .files
+                    .get(&without_dot)
+                    .map(|e| (without_dot, e))
+            })
     };
 
-    let (path1, entry1) = resolve_path(file1)
-        .ok_or_else(|| format!("File not in index: {}", file1.display()))?;
-    let (path2, entry2) = resolve_path(file2)
-        .ok_or_else(|| format!("File not in index: {}", file2.display()))?;
+    let (path1, entry1) =
+        resolve_path(file1).ok_or_else(|| format!("File not in index: {}", file1.display()))?;
+    let (path2, entry2) =
+        resolve_path(file2).ok_or_else(|| format!("File not in index: {}", file2.display()))?;
 
     // Compute similarities
-    let kw1: HashSet<String> = entry1.keywords.iter()
+    let kw1: HashSet<String> = entry1
+        .keywords
+        .iter()
         .chain(entry1.body_keywords.iter())
         .map(|k| k.to_lowercase())
         .collect();
-    let kw2: HashSet<String> = entry2.keywords.iter()
+    let kw2: HashSet<String> = entry2
+        .keywords
+        .iter()
         .chain(entry2.body_keywords.iter())
         .map(|k| k.to_lowercase())
         .collect();
@@ -1339,47 +1457,102 @@ fn cmd_diff(
     println!("{}", "Similarity Scores".green().bold());
     println!();
     println!("  Combined:    {}%", (combined * 100.0) as u32);
-    println!("  Jaccard:     {}% (keyword overlap)", (jaccard * 100.0) as u32);
-    println!("  SimHash:     {}% (content structure)", (simhash_sim * 100.0) as u32);
+    println!(
+        "  Jaccard:     {}% (keyword overlap)",
+        (jaccard * 100.0) as u32
+    );
+    println!(
+        "  SimHash:     {}% (content structure)",
+        (simhash_sim * 100.0) as u32
+    );
     println!();
 
-    println!("{} ({} keywords)", "Shared Keywords".green().bold(), shared.len());
+    println!(
+        "{} ({} keywords)",
+        "Shared Keywords".green().bold(),
+        shared.len()
+    );
     let mut shared_vec: Vec<_> = shared.iter().collect();
     shared_vec.sort();
     for chunk in shared_vec.chunks(8) {
-        println!("  {}", chunk.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(", "));
+        println!(
+            "  {}",
+            chunk
+                .iter()
+                .map(|s| s.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
     }
 
     println!();
-    println!("{} ({} keywords)", format!("Only in {}", path1.split('/').last().unwrap_or(&path1)).yellow().bold(), only_in_1.len());
+    println!(
+        "{} ({} keywords)",
+        format!("Only in {}", path1.split('/').next_back().unwrap_or(&path1))
+            .yellow()
+            .bold(),
+        only_in_1.len()
+    );
     let mut only1_vec: Vec<_> = only_in_1.iter().take(24).collect();
     only1_vec.sort();
     for chunk in only1_vec.chunks(8) {
-        println!("  {}", chunk.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(", "));
+        println!(
+            "  {}",
+            chunk
+                .iter()
+                .map(|s| s.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
     }
     if only_in_1.len() > 24 {
         println!("  ... and {} more", only_in_1.len() - 24);
     }
 
     println!();
-    println!("{} ({} keywords)", format!("Only in {}", path2.split('/').last().unwrap_or(&path2)).yellow().bold(), only_in_2.len());
+    println!(
+        "{} ({} keywords)",
+        format!("Only in {}", path2.split('/').next_back().unwrap_or(&path2))
+            .yellow()
+            .bold(),
+        only_in_2.len()
+    );
     let mut only2_vec: Vec<_> = only_in_2.iter().take(24).collect();
     only2_vec.sort();
     for chunk in only2_vec.chunks(8) {
-        println!("  {}", chunk.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(", "));
+        println!(
+            "  {}",
+            chunk
+                .iter()
+                .map(|s| s.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
     }
     if only_in_2.len() > 24 {
         println!("  ... and {} more", only_in_2.len() - 24);
     }
 
     // Show shared headings
-    let h1: HashSet<String> = entry1.headings.iter().map(|h| h.text.to_lowercase()).collect();
-    let h2: HashSet<String> = entry2.headings.iter().map(|h| h.text.to_lowercase()).collect();
+    let h1: HashSet<String> = entry1
+        .headings
+        .iter()
+        .map(|h| h.text.to_lowercase())
+        .collect();
+    let h2: HashSet<String> = entry2
+        .headings
+        .iter()
+        .map(|h| h.text.to_lowercase())
+        .collect();
     let shared_headings: Vec<_> = h1.intersection(&h2).collect();
 
     if !shared_headings.is_empty() {
         println!();
-        println!("{} ({} headings)", "Identical Headings".red().bold(), shared_headings.len());
+        println!(
+            "{} ({} headings)",
+            "Identical Headings".red().bold(),
+            shared_headings.len()
+        );
         for h in shared_headings.iter().take(10) {
             println!("  - {}", h);
         }
@@ -1433,7 +1606,7 @@ fn cmd_dupes_sections(
     #[derive(Debug)]
     struct SectionCluster {
         heading: String,
-        files: Vec<(String, f64, usize, usize)>,  // (file_path, similarity, line_start, line_end)
+        files: Vec<(String, f64, usize, usize)>, // (file_path, similarity, line_start, line_end)
         avg_simhash: u64,
     }
 
@@ -1478,14 +1651,26 @@ fn cmd_dupes_sections(
     let elapsed = start.elapsed();
 
     // Filter clusters by min_files threshold
-    let duplicate_clusters: Vec<_> = clusters.into_iter()
+    let duplicate_clusters: Vec<_> = clusters
+        .into_iter()
         .filter(|c| c.files.len() >= min_files)
         .collect();
 
     if duplicate_clusters.is_empty() {
-        println!("{}", format!("No duplicate sections found with {} or more files at {}% threshold.",
-            min_files, (threshold * 100.0) as u32).green());
-        eprintln!("Section analysis: {:?} ({} sections analyzed)", elapsed, all_sections.len());
+        println!(
+            "{}",
+            format!(
+                "No duplicate sections found with {} or more files at {}% threshold.",
+                min_files,
+                (threshold * 100.0) as u32
+            )
+            .green()
+        );
+        eprintln!(
+            "Section analysis: {:?} ({} sections analyzed)",
+            elapsed,
+            all_sections.len()
+        );
         return Ok(());
     }
 
@@ -1494,33 +1679,42 @@ fn cmd_dupes_sections(
     sorted_clusters.sort_by(|a, b| b.files.len().cmp(&a.files.len()));
 
     if json {
-        let output: Vec<_> = sorted_clusters.iter()
-            .map(|cluster| serde_json::json!({
-                "heading": cluster.heading,
-                "file_count": cluster.files.len(),
-                "files": cluster.files.iter().map(|(path, sim, start, end)| {
-                    serde_json::json!({
-                        "path": path,
-                        "similarity": sim,
-                        "line_start": start,
-                        "line_end": end,
-                    })
-                }).collect::<Vec<_>>(),
-            }))
+        let output: Vec<_> = sorted_clusters
+            .iter()
+            .map(|cluster| {
+                serde_json::json!({
+                    "heading": cluster.heading,
+                    "file_count": cluster.files.len(),
+                    "files": cluster.files.iter().map(|(path, sim, start, end)| {
+                        serde_json::json!({
+                            "path": path,
+                            "similarity": sim,
+                            "line_start": start,
+                            "line_end": end,
+                        })
+                    }).collect::<Vec<_>>(),
+                })
+            })
             .collect();
         println!("{}", serde_json::to_string_pretty(&output)?);
         return Ok(());
     }
 
-    println!("{} duplicate section clusters found (threshold: {}%, min files: {})",
+    println!(
+        "{} duplicate section clusters found (threshold: {}%, min files: {})",
         sorted_clusters.len().to_string().yellow().bold(),
         (threshold * 100.0) as u32,
         min_files
     );
-    eprintln!("Section analysis: {:?} ({} sections analyzed)\n", elapsed, all_sections.len());
+    eprintln!(
+        "Section analysis: {:?} ({} sections analyzed)\n",
+        elapsed,
+        all_sections.len()
+    );
 
     for cluster in sorted_clusters.iter().take(20) {
-        println!("{} {} ({} files)",
+        println!(
+            "{} {} ({} files)",
             "Section:".cyan().bold(),
             cluster.heading.yellow(),
             cluster.files.len()
@@ -1528,7 +1722,8 @@ fn cmd_dupes_sections(
 
         for (path, similarity, line_start, line_end) in &cluster.files {
             let sim_pct = (similarity * 100.0) as u32;
-            println!("  {}% {}:{}-{}",
+            println!(
+                "  {}% {}:{}-{}",
                 sim_pct.to_string().dimmed(),
                 path,
                 line_start,
@@ -1539,7 +1734,14 @@ fn cmd_dupes_sections(
     }
 
     if sorted_clusters.len() > 20 {
-        println!("{}", format!("... and {} more section clusters", sorted_clusters.len() - 20).dimmed());
+        println!(
+            "{}",
+            format!(
+                "... and {} more section clusters",
+                sorted_clusters.len() - 20
+            )
+            .dimmed()
+        );
     }
 
     Ok(())
@@ -1550,32 +1752,47 @@ fn cmd_stats(top_keywords: usize, index_dir: &Path) -> Result<(), Box<dyn std::e
     let reverse_index = load_reverse_index(index_dir)?;
 
     // Count keyword occurrences
-    let mut keyword_counts: Vec<_> = reverse_index.keywords.iter()
+    let mut keyword_counts: Vec<_> = reverse_index
+        .keywords
+        .iter()
         .map(|(k, v)| (k.clone(), v.len()))
         .collect();
     keyword_counts.sort_by(|a, b| b.1.cmp(&a.1));
 
-    let total_headings: usize = forward_index.files.values()
-        .map(|e| e.headings.len())
-        .sum();
-    let total_links: usize = forward_index.files.values()
-        .map(|e| e.links.len())
-        .sum();
-    let total_body_keywords: usize = forward_index.files.values()
+    let total_headings: usize = forward_index.files.values().map(|e| e.headings.len()).sum();
+    let total_links: usize = forward_index.files.values().map(|e| e.links.len()).sum();
+    let total_body_keywords: usize = forward_index
+        .files
+        .values()
         .map(|e| e.body_keywords.len())
         .sum();
 
     println!("{}", "Index Statistics".green().bold());
     println!();
-    println!("  Total files:       {}", forward_index.files.len().to_string().cyan());
-    println!("  Unique keywords:   {}", reverse_index.keywords.len().to_string().cyan());
+    println!(
+        "  Total files:       {}",
+        forward_index.files.len().to_string().cyan()
+    );
+    println!(
+        "  Unique keywords:   {}",
+        reverse_index.keywords.len().to_string().cyan()
+    );
     println!("  Total headings:    {}", total_headings.to_string().cyan());
-    println!("  Body keywords:     {}", total_body_keywords.to_string().cyan());
+    println!(
+        "  Body keywords:     {}",
+        total_body_keywords.to_string().cyan()
+    );
     println!("  Total links:       {}", total_links.to_string().cyan());
-    println!("  Index version:     {}", forward_index.version.to_string().dimmed());
+    println!(
+        "  Index version:     {}",
+        forward_index.version.to_string().dimmed()
+    );
     println!("  Indexed at:        {}", forward_index.indexed_at.dimmed());
     println!();
-    println!("{}", format!("Top {} Keywords", top_keywords).green().bold());
+    println!(
+        "{}",
+        format!("Top {} Keywords", top_keywords).green().bold()
+    );
     println!();
 
     for (keyword, count) in keyword_counts.iter().take(top_keywords) {
@@ -1602,7 +1819,7 @@ fn cmd_repl(index_dir: &Path) -> Result<(), Box<dyn std::error::Error>> {
             break;
         }
 
-        let parts: Vec<&str> = line.trim().split_whitespace().collect();
+        let parts: Vec<&str> = line.split_whitespace().collect();
         if parts.is_empty() {
             continue;
         }
@@ -1661,15 +1878,15 @@ fn cmd_repl(index_dir: &Path) -> Result<(), Box<dyn std::error::Error>> {
 
 fn load_forward_index(index_dir: &Path) -> Result<ForwardIndex, Box<dyn std::error::Error>> {
     let path = index_dir.join("forward_index.json");
-    let content = fs::read_to_string(&path)
-        .map_err(|_| "Index not found. Run 'yore build' first.")?;
+    let content =
+        fs::read_to_string(&path).map_err(|_| "Index not found. Run 'yore build' first.")?;
     Ok(serde_json::from_str(&content)?)
 }
 
 fn load_reverse_index(index_dir: &Path) -> Result<ReverseIndex, Box<dyn std::error::Error>> {
     let path = index_dir.join("reverse_index.json");
-    let content = fs::read_to_string(&path)
-        .map_err(|_| "Index not found. Run 'yore build' first.")?;
+    let content =
+        fs::read_to_string(&path).map_err(|_| "Index not found. Run 'yore build' first.")?;
     Ok(serde_json::from_str(&content)?)
 }
 
@@ -1725,10 +1942,10 @@ struct CrossRef {
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 enum DocType {
-    Adr,     // Priority 1
-    Design,  // Priority 2
-    Ops,     // Priority 3
-    Other,   // Priority 4
+    Adr,    // Priority 1
+    Design, // Priority 2
+    Ops,    // Priority 3
+    Other,  // Priority 4
 }
 
 /// Search for relevant sections using BM25 scoring
@@ -1806,7 +2023,9 @@ fn search_relevant_sections(
     all_sections.sort_by(|a, b| {
         let score_a = a.bm25_score * 0.7 + a.canonicality * 0.3;
         let score_b = b.bm25_score * 0.7 + b.canonicality * 0.3;
-        score_b.partial_cmp(&score_a).unwrap_or(std::cmp::Ordering::Equal)
+        score_b
+            .partial_cmp(&score_a)
+            .unwrap_or(std::cmp::Ordering::Equal)
     });
 
     // Take top N sections
@@ -1814,7 +2033,7 @@ fn search_relevant_sections(
 }
 
 /// Score document canonicality based on path, recency, and patterns
-fn score_canonicality(doc_path: &str, entry: &FileEntry) -> f64 {
+fn score_canonicality(doc_path: &str, _entry: &FileEntry) -> f64 {
     let mut score: f64 = 0.5; // baseline
 
     let path_lower = doc_path.to_lowercase();
@@ -1826,7 +2045,10 @@ fn score_canonicality(doc_path: &str, entry: &FileEntry) -> f64 {
     if path_lower.contains("docs/index/") {
         score += 0.15;
     }
-    if path_lower.contains("scratch") || path_lower.contains("archive") || path_lower.contains("old") {
+    if path_lower.contains("scratch")
+        || path_lower.contains("archive")
+        || path_lower.contains("old")
+    {
         score -= 0.3;
     }
     if path_lower.contains("deprecated") || path_lower.contains("backup") {
@@ -1852,15 +2074,11 @@ fn score_canonicality(doc_path: &str, entry: &FileEntry) -> f64 {
     // In future: add last_modified to FileEntry
 
     // Clamp to [0.0, 1.0]
-    score.max(0.0).min(1.0)
+    score.clamp(0.0, 1.0)
 }
 
 /// Distill sections into markdown digest within token budget
-fn distill_to_markdown(
-    sections: &[SectionMatch],
-    query: &str,
-    max_tokens: usize,
-) -> String {
+fn distill_to_markdown(sections: &[SectionMatch], query: &str, max_tokens: usize) -> String {
     let mut output = String::new();
     let mut used_tokens = 0;
 
@@ -1885,7 +2103,7 @@ fn distill_to_markdown(
     for section in sections {
         doc_groups
             .entry(section.doc_path.clone())
-            .or_insert_with(Vec::new)
+            .or_default()
             .push(section);
     }
 
@@ -1897,7 +2115,9 @@ fn distill_to_markdown(
     ranked_docs.sort_by(|a, b| {
         let score_a = a.1[0].bm25_score * 0.7 + a.1[0].canonicality * 0.3;
         let score_b = b.1[0].bm25_score * 0.7 + b.1[0].canonicality * 0.3;
-        score_b.partial_cmp(&score_a).unwrap_or(std::cmp::Ordering::Equal)
+        score_b
+            .partial_cmp(&score_a)
+            .unwrap_or(std::cmp::Ordering::Equal)
     });
 
     for (idx, (doc_path, doc_sections)) in ranked_docs.iter().enumerate().take(10) {
@@ -1990,7 +2210,7 @@ fn build_adr_index(index: &ForwardIndex) -> HashMap<String, String> {
     let mut adr_map = HashMap::new();
     let adr_regex = Regex::new(r"ADR[-_]?(\d{2,4})").unwrap();
 
-    for (path, _) in &index.files {
+    for path in index.files.keys() {
         let path_lower = path.to_lowercase();
         if path_lower.contains("/adr/") || path_lower.contains("adr-") {
             if let Some(caps) = adr_regex.captures(path) {
@@ -2008,10 +2228,7 @@ fn build_adr_index(index: &ForwardIndex) -> HashMap<String, String> {
 }
 
 /// Parse markdown links from a section's content
-fn parse_markdown_links(
-    section: &SectionMatch,
-    origin_dir: &Path,
-) -> Vec<CrossRef> {
+fn parse_markdown_links(section: &SectionMatch, origin_dir: &Path) -> Vec<CrossRef> {
     let mut refs = Vec::new();
 
     // Regex: [text](target) - we'll filter out ![image] manually
@@ -2019,7 +2236,7 @@ fn parse_markdown_links(
 
     for caps in link_regex.captures_iter(&section.content) {
         // Skip if this is an image link (starts with !)
-        if caps.get(1).map_or(false, |m| m.as_str() == "!") {
+        if caps.get(1).is_some_and(|m| m.as_str() == "!") {
             continue;
         }
 
@@ -2036,13 +2253,19 @@ fn parse_markdown_links(
 
             // Parse target: path.md#anchor
             let (path_part, anchor) = if let Some(hash_pos) = target_str.find('#') {
-                (&target_str[..hash_pos], Some(target_str[hash_pos + 1..].to_string()))
+                (
+                    &target_str[..hash_pos],
+                    Some(target_str[hash_pos + 1..].to_string()),
+                )
             } else {
                 (target_str, None)
             };
 
             // Skip non-markdown links
-            if !path_part.ends_with(".md") && !path_part.ends_with(".txt") && !path_part.ends_with(".rst") {
+            if !path_part.ends_with(".md")
+                && !path_part.ends_with(".txt")
+                && !path_part.ends_with(".rst")
+            {
                 continue;
             }
 
@@ -2095,10 +2318,7 @@ fn normalize_path(path: &Path) -> String {
 }
 
 /// Parse ADR ID references from section content
-fn parse_adr_ids(
-    section: &SectionMatch,
-    adr_index: &HashMap<String, String>,
-) -> Vec<CrossRef> {
+fn parse_adr_ids(section: &SectionMatch, adr_index: &HashMap<String, String>) -> Vec<CrossRef> {
     let mut refs = Vec::new();
 
     // Regex: ADR-013, ADR 13, ADR_0013
@@ -2181,7 +2401,10 @@ fn classify_target_doc(path: &str) -> DocType {
         DocType::Adr
     } else if path_lower.contains("architecture") || path_lower.contains("design") {
         DocType::Design
-    } else if path_lower.contains("runbook") || path_lower.contains("operations") || path_lower.contains("ops") {
+    } else if path_lower.contains("runbook")
+        || path_lower.contains("operations")
+        || path_lower.contains("ops")
+    {
         DocType::Ops
     } else {
         DocType::Other
@@ -2197,7 +2420,14 @@ fn select_sections_for_adr(
     let mut sections = Vec::new();
 
     // Priority sections: Context, Decision, Consequences
-    let priority_keywords = ["context", "decision", "consequences", "motivation", "rationale", "summary"];
+    let priority_keywords = [
+        "context",
+        "decision",
+        "consequences",
+        "motivation",
+        "rationale",
+        "summary",
+    ];
 
     if let Ok(content) = fs::read_to_string(doc_path) {
         let lines: Vec<&str> = content.lines().collect();
@@ -2210,7 +2440,9 @@ fn select_sections_for_adr(
 
             // Check if this is a priority section
             let heading_lower = section.heading.to_lowercase();
-            let is_priority = priority_keywords.iter().any(|kw| heading_lower.contains(kw));
+            let is_priority = priority_keywords
+                .iter()
+                .any(|kw| heading_lower.contains(kw));
 
             if is_priority || sections.is_empty() {
                 // Include this section
@@ -2264,13 +2496,15 @@ fn select_sections_for_design(
 
         // If anchor is specified, try to find matching section
         if let Some(anchor_str) = anchor {
-            let anchor_lower = anchor_str.to_lowercase().replace('-', " ").replace('_', " ");
+            let anchor_lower = anchor_str.to_lowercase().replace(['-', '_'], " ");
 
             for section in &entry.section_fingerprints {
                 let heading_lower = section.heading.to_lowercase();
                 let heading_slug = heading_lower.replace(' ', "-");
 
-                if heading_slug.contains(&anchor_str.replace(' ', "-")) || heading_lower.contains(&anchor_lower) {
+                if heading_slug.contains(&anchor_str.replace(' ', "-"))
+                    || heading_lower.contains(&anchor_lower)
+                {
                     // Found matching section
                     let start = section.line_start.saturating_sub(1);
                     let end = section.line_end.min(lines.len());
@@ -2342,7 +2576,16 @@ fn select_sections_for_ops(
     let mut sections = Vec::new();
 
     // Keywords for ops docs
-    let ops_keywords = ["deploy", "restart", "rollback", "monitor", "troubleshoot", "debug", "fix", "restore"];
+    let ops_keywords = [
+        "deploy",
+        "restart",
+        "rollback",
+        "monitor",
+        "troubleshoot",
+        "debug",
+        "fix",
+        "restore",
+    ];
 
     if let Ok(content) = fs::read_to_string(doc_path) {
         let lines: Vec<&str> = content.lines().collect();
@@ -2402,10 +2645,7 @@ fn select_sections_for_ops(
 }
 
 /// Select sections from an "other" type doc
-fn select_sections_for_other(
-    doc_path: &str,
-    entry: &FileEntry,
-) -> Vec<SectionMatch> {
+fn select_sections_for_other(doc_path: &str, entry: &FileEntry) -> Vec<SectionMatch> {
     let mut sections = Vec::new();
 
     if let Ok(content) = fs::read_to_string(doc_path) {
@@ -2462,7 +2702,7 @@ fn resolve_crossrefs(
 
         doc_refs
             .entry(cr.target_doc_path.clone())
-            .or_insert_with(Vec::new)
+            .or_default()
             .push(cr);
     }
 
@@ -2611,11 +2851,39 @@ fn score_sentence(
 
     // 2. High-value keywords
     let keywords = [
-        "deploy", "deployment", "restart", "auth", "authentication", "session", "state",
-        "error", "failure", "retry", "timeout", "architecture", "design", "decision",
-        "invariant", "must", "should", "requires", "context", "rationale", "consequence",
-        "kubernetes", "container", "pod", "service", "config", "configuration",
-        "security", "permission", "rbac", "policy", "test", "testing",
+        "deploy",
+        "deployment",
+        "restart",
+        "auth",
+        "authentication",
+        "session",
+        "state",
+        "error",
+        "failure",
+        "retry",
+        "timeout",
+        "architecture",
+        "design",
+        "decision",
+        "invariant",
+        "must",
+        "should",
+        "requires",
+        "context",
+        "rationale",
+        "consequence",
+        "kubernetes",
+        "container",
+        "pod",
+        "service",
+        "config",
+        "configuration",
+        "security",
+        "permission",
+        "rbac",
+        "policy",
+        "test",
+        "testing",
     ];
 
     for keyword in &keywords {
@@ -2625,10 +2893,15 @@ fn score_sentence(
     }
 
     // 3. Contains code or config
-    if sentence.contains("```") || sentence.contains("    ")
-        || sentence.contains("kubectl") || sentence.contains("docker")
-        || sentence.contains("make") || sentence.contains("cargo")
-        || sentence.contains("python") || sentence.contains("bash") {
+    if sentence.contains("```")
+        || sentence.contains("    ")
+        || sentence.contains("kubectl")
+        || sentence.contains("docker")
+        || sentence.contains("make")
+        || sentence.contains("cargo")
+        || sentence.contains("python")
+        || sentence.contains("bash")
+    {
         score += W_CODE;
     }
 
@@ -2638,11 +2911,13 @@ fn score_sentence(
     }
 
     // 5. Cross-reference bonus
-    if section_has_crossref {
-        if sentence_lower.contains("adr") || sentence_lower.contains("see ")
-            || sentence_lower.contains("refer") || sentence_lower.contains("described in") {
-            score += W_CROSSREF;
-        }
+    if section_has_crossref
+        && (sentence_lower.contains("adr")
+            || sentence_lower.contains("see ")
+            || sentence_lower.contains("refer")
+            || sentence_lower.contains("described in"))
+    {
+        score += W_CROSSREF;
     }
 
     score
@@ -2703,8 +2978,8 @@ fn refine_section(
     }
 
     // Check if section has cross-references
-    let has_crossref = body.to_lowercase().contains("adr")
-        || body.contains("[") && body.contains("](");
+    let has_crossref =
+        body.to_lowercase().contains("adr") || body.contains("[") && body.contains("](");
 
     // Score each sentence
     let mut scored_sentences: Vec<(String, f64)> = sentences
@@ -2848,12 +3123,8 @@ fn cmd_assemble(
                 .collect();
 
             // Resolve cross-references
-            let xref_sections = resolve_crossrefs(
-                &crossrefs,
-                &primary_docs,
-                &forward_index,
-                xref_token_budget,
-            );
+            let xref_sections =
+                resolve_crossrefs(&crossrefs, &primary_docs, &forward_index, xref_token_budget);
 
             // Merge cross-ref sections
             all_sections.extend(xref_sections);
@@ -2873,16 +3144,13 @@ fn cmd_assemble(
 }
 
 /// Evaluation command handler - runs retrieval pipeline against test questions
-fn cmd_eval(
-    questions_path: &Path,
-    index_dir: &Path,
-) -> Result<(), Box<dyn std::error::Error>> {
+fn cmd_eval(questions_path: &Path, index_dir: &Path) -> Result<(), Box<dyn std::error::Error>> {
     // Load questions from JSONL file
     let questions_content = fs::read_to_string(questions_path)?;
     let questions: Vec<Question> = questions_content
         .lines()
         .filter(|line| !line.trim().is_empty())
-        .map(|line| serde_json::from_str(line))
+        .map(serde_json::from_str)
         .collect::<Result<Vec<_>, _>>()?;
 
     if questions.is_empty() {
@@ -2936,19 +3204,16 @@ fn cmd_eval(
                 .map(|s| s.doc_path.clone())
                 .collect();
 
-            let xref_sections = resolve_crossrefs(
-                &crossrefs,
-                &primary_docs,
-                &forward_index,
-                xref_token_budget,
-            );
+            let xref_sections =
+                resolve_crossrefs(&crossrefs, &primary_docs, &forward_index, xref_token_budget);
 
             all_sections.extend(xref_sections);
         }
 
         // Extractive refinement
         let max_tokens_per_section = max_tokens / all_sections.len().max(1);
-        let refined_sections = apply_extractive_refiner(all_sections, &question.q, max_tokens_per_section);
+        let refined_sections =
+            apply_extractive_refiner(all_sections, &question.q, max_tokens_per_section);
 
         // Distill to markdown
         let digest = distill_to_markdown(&refined_sections, &question.q, max_tokens);
@@ -3008,11 +3273,9 @@ fn cmd_eval(
         println!("{}", "Failed Questions:".yellow().bold());
         for result in &results {
             if !result.passed {
-                println!("  - [{}] {} (hits: {}/{})",
-                    result.id,
-                    result.question,
-                    result.hits,
-                    result.total
+                println!(
+                    "  - [{}] {} (hits: {}/{})",
+                    result.id, result.question, result.hits, result.total
                 );
             }
         }
@@ -3059,7 +3322,11 @@ fn cmd_check_links(
     };
 
     if !json {
-        println!("{} {}", "Checking links in".cyan().bold(), root_dir.display());
+        println!(
+            "{} {}",
+            "Checking links in".cyan().bold(),
+            root_dir.display()
+        );
         println!();
     }
 
@@ -3092,13 +3359,17 @@ fn cmd_check_links(
             if target.starts_with("http://")
                 || target.starts_with("https://")
                 || target.starts_with("mailto:")
-                || target.starts_with("ftp://") {
+                || target.starts_with("ftp://")
+            {
                 continue;
             }
 
             // Parse link to separate file path and anchor
             let (link_path, anchor) = if let Some(idx) = target.find('#') {
-                (target[..idx].to_string(), Some(target[idx + 1..].to_string()))
+                (
+                    target[..idx].to_string(),
+                    Some(target[idx + 1..].to_string()),
+                )
             } else {
                 (target.clone(), None)
             };
@@ -3107,9 +3378,9 @@ fn cmd_check_links(
             let resolved_path = if link_path.is_empty() {
                 // Just an anchor in the current file
                 file_path.clone()
-            } else if link_path.starts_with('/') {
+            } else if let Some(stripped) = link_path.strip_prefix('/') {
                 // Absolute path from root
-                root_dir.join(&link_path[1..]).to_string_lossy().to_string()
+                root_dir.join(stripped).to_string_lossy().to_string()
             } else {
                 // Relative path
                 let source_path = Path::new(file_path);
@@ -3161,7 +3432,10 @@ fn cmd_check_links(
                         line_number: 0,
                         link_text: link.text.clone(),
                         link_target: target.clone(),
-                        error: format!("Could not verify anchor (file has no headings): #{}", anchor_text),
+                        error: format!(
+                            "Could not verify anchor (file has no headings): #{}",
+                            anchor_text
+                        ),
                         anchor: Some(anchor_text.clone()),
                     });
                 }
@@ -3186,7 +3460,15 @@ fn cmd_check_links(
         println!();
         println!("Total links:  {}", total_links);
         println!("Valid links:  {} {}", valid_links, "✓".green().bold());
-        println!("Broken links: {} {}", broken_links.len(), if broken_links.is_empty() { "✓".green().bold() } else { "✗".red().bold() });
+        println!(
+            "Broken links: {} {}",
+            broken_links.len(),
+            if broken_links.is_empty() {
+                "✓".green().bold()
+            } else {
+                "✗".red().bold()
+            }
+        );
         println!();
 
         if !broken_links.is_empty() {
@@ -3218,7 +3500,11 @@ fn cmd_backlinks(
     let normalized_target = normalize_path(Path::new(target_file));
 
     if !json {
-        println!("{} {}", "Finding backlinks for".cyan().bold(), normalized_target.white().bold());
+        println!(
+            "{} {}",
+            "Finding backlinks for".cyan().bold(),
+            normalized_target.white().bold()
+        );
         println!();
     }
 
@@ -3233,13 +3519,17 @@ fn cmd_backlinks(
             if target.starts_with("http://")
                 || target.starts_with("https://")
                 || target.starts_with("mailto:")
-                || target.starts_with("ftp://") {
+                || target.starts_with("ftp://")
+            {
                 continue;
             }
 
             // Parse link to separate file path and anchor
             let (link_path, anchor) = if let Some(idx) = target.find('#') {
-                (target[..idx].to_string(), Some(target[idx + 1..].to_string()))
+                (
+                    target[..idx].to_string(),
+                    Some(target[idx + 1..].to_string()),
+                )
             } else {
                 (target.clone(), None)
             };
@@ -3248,9 +3538,9 @@ fn cmd_backlinks(
             let resolved_path = if link_path.is_empty() {
                 // Just an anchor in the current file
                 source_path.clone()
-            } else if link_path.starts_with('/') {
+            } else if let Some(stripped) = link_path.strip_prefix('/') {
                 // Absolute path - strip leading / and use as-is
-                link_path[1..].to_string()
+                stripped.to_string()
             } else {
                 // Relative path
                 let source_file_path = Path::new(source_path);
@@ -3295,7 +3585,10 @@ fn cmd_backlinks(
         println!();
 
         if backlinks.is_empty() {
-            println!("{}", "No backlinks found. This file is not referenced by any other file.".yellow());
+            println!(
+                "{}",
+                "No backlinks found. This file is not referenced by any other file.".yellow()
+            );
             println!();
             println!("{}", "This may indicate:".yellow());
             println!("  - An orphaned document (consider reviewing for deletion)");
@@ -3304,7 +3597,10 @@ fn cmd_backlinks(
         } else {
             for (idx, backlink) in backlinks.iter().enumerate() {
                 println!("[{}] {}", idx + 1, backlink.source_file.white().bold());
-                println!("    Link: [{}]({})", backlink.link_text, backlink.link_target);
+                println!(
+                    "    Link: [{}]({})",
+                    backlink.link_text, backlink.link_target
+                );
                 if let Some(anchor) = &backlink.anchor {
                     println!("    Anchor: #{}", anchor);
                 }
@@ -3312,7 +3608,11 @@ fn cmd_backlinks(
             }
 
             println!("{}", "Safe to delete?".yellow().bold());
-            println!("  {} These {} file(s) link to this document.", "⚠".yellow(), backlinks.len());
+            println!(
+                "  {} These {} file(s) link to this document.",
+                "⚠".yellow(),
+                backlinks.len()
+            );
             println!("  Review and update references before deletion.");
         }
     }
@@ -3345,13 +3645,17 @@ fn cmd_orphans(
             if target.starts_with("http://")
                 || target.starts_with("https://")
                 || target.starts_with("mailto:")
-                || target.starts_with("ftp://") {
+                || target.starts_with("ftp://")
+            {
                 continue;
             }
 
             // Parse link to separate file path and anchor
             let (link_path, _) = if let Some(idx) = target.find('#') {
-                (target[..idx].to_string(), Some(target[idx + 1..].to_string()))
+                (
+                    target[..idx].to_string(),
+                    Some(target[idx + 1..].to_string()),
+                )
             } else {
                 (target.clone(), None)
             };
@@ -3362,9 +3666,9 @@ fn cmd_orphans(
             }
 
             // Resolve relative path from source file
-            let resolved_path = if link_path.starts_with('/') {
+            let resolved_path = if let Some(stripped) = link_path.strip_prefix('/') {
                 // Absolute path - strip leading / and use as-is
-                link_path[1..].to_string()
+                stripped.to_string()
             } else {
                 // Relative path
                 let source_file_path = Path::new(source_path);
@@ -3426,12 +3730,18 @@ fn cmd_orphans(
         println!();
 
         if orphans.is_empty() {
-            println!("{}", "No orphaned files found. All documents are linked!".green());
+            println!(
+                "{}",
+                "No orphaned files found. All documents are linked!".green()
+            );
             println!();
         } else {
             for (idx, orphan) in orphans.iter().enumerate() {
                 println!("[{}] {}", idx + 1, orphan.file.white().bold());
-                println!("    Size: {} bytes, Lines: {}", orphan.size_bytes, orphan.line_count);
+                println!(
+                    "    Size: {} bytes, Lines: {}",
+                    orphan.size_bytes, orphan.line_count
+                );
                 println!();
             }
 
@@ -3465,7 +3775,10 @@ fn score_canonicality_with_reasons(doc_path: &str, _entry: &FileEntry) -> (f64, 
         score += 0.15;
         reasons.push("Index document (+0.15)".to_string());
     }
-    if path_lower.contains("scratch") || path_lower.contains("archive") || path_lower.contains("old") {
+    if path_lower.contains("scratch")
+        || path_lower.contains("archive")
+        || path_lower.contains("old")
+    {
         score -= 0.3;
         reasons.push("Scratch/archive/old location (-0.3)".to_string());
     }
@@ -3491,7 +3804,7 @@ fn score_canonicality_with_reasons(doc_path: &str, _entry: &FileEntry) -> (f64, 
     }
 
     // Clamp to [0.0, 1.0]
-    let final_score = score.max(0.0).min(1.0);
+    let final_score = score.clamp(0.0, 1.0);
 
     if reasons.is_empty() {
         reasons.push("Baseline score (0.5)".to_string());
@@ -3529,7 +3842,11 @@ fn cmd_canonicality(
     }
 
     // Sort by score descending
-    scored_files.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+    scored_files.sort_by(|a, b| {
+        b.score
+            .partial_cmp(&a.score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
 
     let result = CanonicalityResult {
         total_files: scored_files.len(),
@@ -3542,15 +3859,26 @@ fn cmd_canonicality(
         println!("{}", "Canonicality Scores".cyan().bold());
         println!("{}", "=".repeat(60));
         println!();
-        println!("Total files: {} (threshold: {})", scored_files.len(), threshold);
+        println!(
+            "Total files: {} (threshold: {})",
+            scored_files.len(),
+            threshold
+        );
         println!();
 
         // Group by score ranges
         let high_canon: Vec<_> = scored_files.iter().filter(|s| s.score >= 0.7).collect();
-        let medium_canon: Vec<_> = scored_files.iter().filter(|s| s.score >= 0.5 && s.score < 0.7).collect();
+        let medium_canon: Vec<_> = scored_files
+            .iter()
+            .filter(|s| s.score >= 0.5 && s.score < 0.7)
+            .collect();
         let low_canon: Vec<_> = scored_files.iter().filter(|s| s.score < 0.5).collect();
 
-        println!("{} High canonicality (≥0.7): {} files", "📚".green(), high_canon.len());
+        println!(
+            "{} High canonicality (≥0.7): {} files",
+            "📚".green(),
+            high_canon.len()
+        );
         for file in high_canon.iter().take(10) {
             println!("  [{:.2}] {}", file.score, file.file.white().bold());
             for reason in &file.reasons {
@@ -3562,7 +3890,11 @@ fn cmd_canonicality(
         }
         println!();
 
-        println!("{} Medium canonicality (0.5-0.7): {} files", "📄".yellow(), medium_canon.len());
+        println!(
+            "{} Medium canonicality (0.5-0.7): {} files",
+            "📄".yellow(),
+            medium_canon.len()
+        );
         for file in medium_canon.iter().take(5) {
             println!("  [{:.2}] {}", file.score, file.file);
         }
@@ -3571,7 +3903,11 @@ fn cmd_canonicality(
         }
         println!();
 
-        println!("{} Low canonicality (<0.5): {} files", "📋".red(), low_canon.len());
+        println!(
+            "{} Low canonicality (<0.5): {} files",
+            "📋".red(),
+            low_canon.len()
+        );
         for file in low_canon.iter().take(5) {
             println!("  [{:.2}] {}", file.score, file.file);
             for reason in &file.reasons {
@@ -3797,7 +4133,10 @@ mod tests {
                 break;
             }
         }
-        assert!(file1_file2_together, "Identical files should be in same LSH bucket");
+        assert!(
+            file1_file2_together,
+            "Identical files should be in same LSH bucket"
+        );
     }
 
     #[test]
@@ -3930,9 +4269,21 @@ mod tests {
         let content2 = "## Testing\nRun the tests with:\n```\npytest\n```";
         let content3 = "## Testing\nCompletely different content about testing";
 
-        let headings1 = vec![Heading { line: 1, level: 2, text: "Testing".to_string() }];
-        let headings2 = vec![Heading { line: 1, level: 2, text: "Testing".to_string() }];
-        let headings3 = vec![Heading { line: 1, level: 2, text: "Testing".to_string() }];
+        let headings1 = vec![Heading {
+            line: 1,
+            level: 2,
+            text: "Testing".to_string(),
+        }];
+        let headings2 = vec![Heading {
+            line: 1,
+            level: 2,
+            text: "Testing".to_string(),
+        }];
+        let headings3 = vec![Heading {
+            line: 1,
+            level: 2,
+            text: "Testing".to_string(),
+        }];
 
         let sections1 = index_sections(content1, &headings1);
         let sections2 = index_sections(content2, &headings2);
@@ -3974,7 +4325,7 @@ mod tests {
     fn test_stem_word() {
         // Test actual stemming behavior
         assert_eq!(stem_word("running"), "runn"); // Simple stemmer removes "ing"
-        assert_eq!(stem_word("tests"), "test");   // Removes "s"
+        assert_eq!(stem_word("tests"), "test"); // Removes "s"
         assert_eq!(stem_word("testing"), "test"); // Removes "ing"
         assert_eq!(stem_word("keywords"), "keyword"); // Removes "s"
 

@@ -1,42 +1,165 @@
-# yore - Fast Document Indexer and Retrieval Engine
+<img src="./assets/yorelogo.png" alt="Yore" height="80"/>
 
-**yore** is a deterministic, multi-stage retrieval engine for documentation that provides:
-- BM25-based search ranking
-- Duplicate detection (documents and sections)
-- Cross-reference expansion
-- Extractive refinement for signal density
-- Context assembly for LLM consumption
+# yore – Deterministic Documentation Indexer and Context Assembly Engine
 
-## Installation
+[![CI](https://github.com/rahulrajaram/yore/actions/workflows/ci.yml/badge.svg)](https://github.com/rahulrajaram/yore/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
-Install yore to `~/.local/bin`:
+**yore** is a fast, deterministic tool for indexing, analyzing, and retrieving documentation from a filesystem and assembling that information into high‑quality context for large language models (LLMs) and automation agents.
+
+Where traditional search tools return a list of matching files, yore is designed to answer a more specific question:
+
+> “Given this question and a fixed token budget, what *exact* slice of the documentation should an LLM see to reason correctly and safely?”
+
+Yore combines BM25 search, structural analysis, link graph inspection, duplicate detection, and extractive refinement into a reproducible pipeline that can be used directly by humans or programmatically by agents.
+
+---
+
+## 1. Concepts and Terminology
+
+Before diving into commands, it helps to define a few terms that appear throughout this README.
+
+### Documentation sprawl
+
+“Documentation sprawl” refers to the way documentation accumulates over time:
+
+- Multiple files describe the same feature with slightly different details.
+- Older documents are left in the tree and never removed or clearly marked as deprecated.
+- Temporary or scratch notes are committed and live alongside canonical documentation.
+- Engineers searching for “authentication” might see ten files with overlapping names and no clear indication of which one is authoritative.
+
+Yore is designed to operate in exactly this environment and make it tractable for both humans and LLMs.
+
+### Architecture Decision Record (ADR) and ADR chain
+
+An **ADR (Architecture Decision Record)** is a small document that records a single architectural decision: the context, the decision itself, and the consequences. Projects often store ADRs under a directory such as `docs/adr/ADR-0001-some-decision.md`.
+
+An **ADR chain** is the sequence of ADRs that refer to one another over time, for example:
+
+- `ADR-0013` introduces retry semantics.
+- `ADR-0022` modifies the retry timing.
+- `ADR-0035` deprecates a previous approach.
+
+LLMs frequently need this historical context to answer “why” questions correctly. Yore is able to recognize ADR references (for example, `ADR-013`) and pull those records into the context it assembles.
+
+### Canonical document
+
+In a large repository, several documents may cover similar topics. A **canonical document** is the one that should be treated as the primary source of truth for a topic.
+
+Yore computes a **canonicality score** per document based on path, naming conventions, recency, and other signals, and exposes those scores so tools and agents can make consistent, automated decisions.
+
+---
+
+## 2. What Yore Does
+
+At a high level, yore provides:
+
+- **Indexing** of documentation files (Markdown, text, etc.) using BM25 and structural metadata.
+- **Search and analysis** over that index: free‑text search, duplicate detection, canonicality scoring, link graph queries.
+- **Context assembly for LLMs**, including cross‑reference expansion and extractive refinement controlled by an explicit token budget.
+- **Quality checks**, such as link validation and an evaluation harness for retrieval correctness.
+
+Some example questions Yore helps answer:
+
+- “Which documents describe Kubernetes deployment, and which one is canonical?”
+- “What ADRs exist for authentication and session isolation?”
+- “What documents are unreferenced and safe to clean up?”
+- “What is the smallest, highest‑signal context I can give an LLM for ‘How do I deploy a new service?’ within 8,000 tokens?”
+
+---
+
+## 3. How Yore Differs from Traditional Search Tools
+
+Yore is not a replacement for Lucene, Elasticsearch, Meilisearch, or ripgrep. Instead, it builds on similar primitives and adds additional layers specifically for documentation curation and LLM context assembly.
+
+### 3.1 Comparison matrix
+
+| Capability / Tool                | **Yore**                            | Lucene / Tantivy                     | Elasticsearch / OpenSearch           | Meilisearch                          | ripgrep                              |
+|----------------------------------|-------------------------------------|--------------------------------------|--------------------------------------|--------------------------------------|--------------------------------------|
+| Primary use case                 | Doc indexing + LLM context assembly | General‑purpose search library       | Scalable full‑text search cluster    | Simple search API for applications   | Fast text search in files            |
+| Retrieval model                  | BM25 + structural and link signals  | BM25 / scoring plugins               | BM25 + scoring / aggregations        | BM25‑like                            | Regex / literal matching              |
+| Cross‑reference expansion        | Yes (Markdown links, ADR refs)      | No (caller must implement)           | No (caller must implement)           | No                                   | No                                   |
+| Duplicate detection (docs/sections) | Yes (Jaccard + MinHash + SimHash)  | No (custom code required)            | No                                   | No                                   | No                                   |
+| Canonicality scoring             | Yes (path, naming, recency signals) | No                                   | No                                   | No                                   | No                                   |
+| Link graph analysis (backlinks, orphans) | Yes                         | No                                   | No                                   | No                                   | No                                   |
+| LLM‑aware token budgeting        | Yes (per‑query token budget)        | No                                   | No                                   | No                                   | No                                   |
+| Extractive refinement            | Yes (sentence‑level, code‑preserving) | No                                  | No                                   | No                                   | No                                   |
+| Deterministic output             | Yes (no sampling, no embeddings)    | Yes                                  | Yes (given same index)               | Yes                                  | Yes                                  |
+| Designed for agent integration   | Yes                                 | Caller‑defined                       | Caller‑defined                       | Caller‑defined                       | Caller‑defined                       |
+
+You can use lucene‑like tools to implement the core search primitive. Yore sits at a higher level, orchestrating retrieval, link following, refinement, and evaluation in a way that is explicitly designed for LLMs and documentation maintenance agents.
+
+---
+
+## 4. Architecture Overview
+
+Yore operates in four main phases:
+
+1. **Indexing**
+   The `yore build` command walks a directory tree, identifies documents of interest (for example, `*.md`), and builds an index that includes:
+
+   - BM25 term statistics
+   - Section boundaries and fingerprints
+   - Link information (Markdown links and ADR references)
+   - Basic metadata (path, size, timestamps)
+
+2. **Retrieval and analysis**
+   Commands such as `yore query`, `yore dupes`, `yore dupes-sections`, `yore canonicality`, `yore check-links`, `yore backlinks`, and `yore orphans` operate against this index to answer questions about relevance, duplication, authority, and link structure.
+
+3. **Context assembly for LLMs**
+   The `yore assemble` command runs a multi‑stage pipeline:
+
+   - BM25 to select the most relevant documents and sections.
+   - Cross‑reference expansion to include linked ADRs and design docs.
+   - Extractive refinement to keep code blocks, lists, and high‑value sentences while removing low‑signal prose.
+   - Final trimming to respect a token budget and a maximum section count.
+   - Markdown digest generation suitable for direct LLM input.
+
+4. **Evaluation and governance**
+   The `yore eval` command uses a JSONL question file to validate whether the assembled contexts contain expected substrings, enabling regression detection and measurable improvements to retrieval quality.
+
+All operations are deterministic: given the same index and configuration, yore will produce the same outputs.
+
+---
+
+## 5. Installation
+
+Install yore into `~/.local/bin`:
 
 ```bash
 cd tools/yore
 ./install.sh
-```
+````
 
-Verify installation:
+Verify the installation:
 
 ```bash
 yore --version
 ```
 
-## Quick Start
+---
 
-### 1. Build an Index
+## 6. Quick Start
+
+### 6.1 Build an index
+
+Create an index over Markdown files in `docs/`:
 
 ```bash
 yore build docs --output docs/.index --types md
 ```
 
-### 2. Search
+### 6.2 Run a search query
+
+Use BM25‑based search over the index:
 
 ```bash
 yore query kubernetes deployment --index docs/.index
 ```
 
-### 3. Find Duplicates
+### 6.3 Detect duplicate content
+
+Identify duplicate sections and documents:
 
 ```bash
 # Duplicate sections across documents
@@ -46,147 +169,170 @@ yore dupes-sections --index docs/.index --threshold 0.7
 yore dupes --index docs/.index --threshold 0.35
 ```
 
-### 4. Assemble Context for LLMs
+### 6.4 Assemble context for an LLM
+
+Generate a context digest for a question:
 
 ```bash
-yore assemble "How does authentication work?" --index docs/.index
+yore assemble "How does authentication work?" \
+  --depth 1 \
+  --max-tokens 8000 \
+  --index docs/.index > context.md
 ```
 
-### 5. Evaluate Retrieval Quality
+You can then paste `context.md` directly into an LLM prompt.
+
+### 6.5 Evaluate retrieval quality
+
+Run the evaluation harness against a test set of questions:
 
 ```bash
-yore eval --questions evaluation/questions.jsonl --index docs/.index
+yore eval --questions questions.jsonl --index docs/.index
 ```
 
-### 6. Check Links
+### 6.6 Link and structure analysis
+
+Validate links and inspect the documentation structure:
 
 ```bash
 # Find broken links and anchors
-yore check-links --index docs/.index
-
-# JSON output for agents
 yore check-links --index docs/.index --json
-```
 
-### 7. Find Backlinks
-
-```bash
-# See what documents link to a specific file
+# Show who links to a specific document
 yore backlinks docs/architecture/DEPLOYMENT-GUIDE.md --index docs/.index
-```
 
-### 8. Find Orphaned Files
-
-```bash
-# Find files with no inbound links
+# Find documents with no inbound links
 yore orphans --index docs/.index --exclude README
-```
 
-### 9. Show Canonicality Scores
-
-```bash
-# Score documents by authority/trustworthiness
+# Show canonical documents by authority score
 yore canonicality --index docs/.index --threshold 0.7
 ```
 
-## Commands
+---
 
-### `yore build`
+## 7. Command Reference
 
-Build forward and reverse indexes over a document corpus.
+This section provides a concise reference for each major command. All commands that operate on an index accept `--index <index-dir>`.
+
+### 7.1 `yore build`
+
+Builds a forward and reverse index over a directory tree.
 
 ```bash
 yore build <path> --output <index-dir> --types <extensions>
 ```
 
-**Options:**
-- `--output, -o` - Index directory (default: `.yore`)
-- `--types, -t` - File extensions to index (default: `md,txt,rst`)
-- `--exclude, -e` - Patterns to exclude (repeatable)
+**Key options**
 
-**Example:**
+* `--output, -o` – Index directory (default: `.yore`)
+* `--types, -t` – Comma‑separated list of file extensions to index (default: `md,txt,rst`)
+* `--exclude, -e` – Glob‑style patterns to exclude (repeatable)
+
+**Example**
+
 ```bash
 yore build docs --output docs/.index --types md,txt
 ```
 
-### `yore query`
+---
 
-Search the index using BM25 ranking.
+### 7.2 `yore query`
+
+Runs a BM25 search across the index.
 
 ```bash
 yore query <terms...> --index <index-dir>
 ```
 
-**Options:**
-- `--limit, -n` - Max results (default: 10)
-- `--files-only, -l` - Show only file paths
-- `--json` - Output as JSON
+**Key options**
 
-**Example:**
+* `--limit, -n` – Maximum number of results (default: 10)
+* `--files-only, -l` – Only show file paths
+* `--json` – Emit machine‑readable JSON
+
+**Example**
+
 ```bash
 yore query kubernetes deployment --limit 5 --index docs/.index
 ```
 
-### `yore dupes`
+---
 
-Find duplicate or highly similar documents.
+### 7.3 `yore dupes`
+
+Finds duplicate or highly similar documents across the corpus.
 
 ```bash
 yore dupes --index <index-dir>
 ```
 
-**Options:**
-- `--threshold, -t` - Similarity threshold (default: 0.35)
-- `--group` - Group duplicates together
-- `--json` - Output as JSON
+**Key options**
 
-**Scoring:** Combined metric using 40% Jaccard + 30% SimHash + 30% MinHash
+* `--threshold, -t` – Similarity threshold (default: 0.35)
+* `--group` – Group duplicates together
+* `--json` – Emit JSON output
 
-**Example:**
+The similarity score is a combined metric using Jaccard overlap, SimHash, and MinHash, for example:
+
+* 40% Jaccard
+* 30% SimHash
+* 30% MinHash
+
+**Example**
+
 ```bash
-yore dupes --threshold 0.4 --json --index docs/.index
+yore dupes --threshold 0.4 --group --json --index docs/.index
 ```
 
-### `yore dupes-sections`
+---
 
-Find duplicate sections across documents.
+### 7.4 `yore dupes-sections`
+
+Identifies duplicate sections across different documents.
 
 ```bash
 yore dupes-sections --index <index-dir>
 ```
 
-**Options:**
-- `--threshold, -t` - SimHash similarity threshold (default: 0.7)
-- `--min-files, -n` - Minimum files sharing a section (default: 2)
-- `--json` - Output as JSON
+**Key options**
 
-**Example:**
+* `--threshold, -t` – SimHash similarity threshold (default: 0.7)
+* `--min-files, -n` – Minimum number of distinct files sharing a similar section (default: 2)
+* `--json` – Emit JSON output
+
+**Example**
+
 ```bash
-# Find sections appearing in 5+ files with 85%+ similarity
-yore dupes-sections --threshold 0.85 --min-files 5 --json
+# Find sections appearing in 5+ files with ≥ 85% similarity
+yore dupes-sections --threshold 0.85 --min-files 5 --json --index docs/.index
 ```
 
-### `yore assemble`
+---
 
-Assemble context digest for LLM consumption.
+### 7.5 `yore assemble`
+
+Assembles a context digest for LLM consumption from the indexed documentation.
 
 ```bash
 yore assemble <query> --index <index-dir>
 ```
 
-**Pipeline:**
-1. BM25 primary section selection
-2. Cross-reference expansion (ADR + markdown links)
-3. Extractive refinement (signal density)
-4. Markdown digest generation
+**Pipeline steps**
 
-**Options:**
-- `--max-tokens, -t` - Token budget (default: 8000)
-- `--max-sections, -s` - Max sections to include (default: 20)
-- `--depth, -d` - Cross-ref expansion depth (default: 1, max: 2)
-- `--format, -f` - Output format (default: markdown)
+1. BM25 primary document and section selection
+2. Cross‑reference expansion (Markdown links and ADR references)
+3. Extractive refinement (preserves code blocks, lists, headings; keeps high‑value sentences)
+4. Final token‑aware trimming and markdown digest generation
 
-**Example:**
+**Key options**
+
+* `--max-tokens, -t` – Total token budget for the digest (default: 8000)
+* `--max-sections, -s` – Maximum sections to include (default: 20)
+* `--depth, -d` – Cross‑reference expansion depth (default: 1, maximum 2)
+* `--format, -f` – Output format (`markdown` is the default)
+
+**Example**
+
 ```bash
 yore assemble "How does the authentication system work?" \
   --max-tokens 6000 \
@@ -194,161 +340,234 @@ yore assemble "How does the authentication system work?" \
   --index docs/.index > context.md
 ```
 
-### `yore eval`
+---
 
-Evaluate retrieval pipeline against test questions.
+### 7.6 `yore eval`
+
+Evaluates the retrieval pipeline against a set of test questions.
 
 ```bash
 yore eval --questions <jsonl-file> --index <index-dir>
 ```
 
-**Questions format (JSONL):**
+Each line in the JSONL file represents a test question:
+
 ```json
 {"id": 1, "q": "How does auth work?", "expect": ["session", "token"], "min_hits": 2}
 ```
 
-**Example:**
+Yore assembles context for each question, checks for expected substrings, and reports per‑question hits and an overall pass rate.
+
+**Example**
+
 ```bash
-yore eval --questions evaluation/questions.jsonl --index docs/.index
+yore eval --questions questions.jsonl --index docs/.index
 ```
 
-### `yore check-links`
+---
 
-Validate all markdown links and anchors in the documentation.
+### 7.7 `yore check-links`
+
+Validates all Markdown links and anchors in the indexed documents.
 
 ```bash
 yore check-links --index <index-dir>
 ```
 
-**Options:**
-- `--json` - Output as JSON
-- `--root, -r` - Root directory for resolving relative paths
+**Key options**
 
-**Output:** Reports broken links, missing files, and invalid anchors with source locations.
+* `--json` – Emit machine‑readable JSON
+* `--root, -r` – Root directory for resolving relative paths (if different from index root)
 
-**Example:**
+The command reports broken links, missing target files, and invalid anchors, including source file and line location.
+
+**Example**
+
 ```bash
 yore check-links --index docs/.index --json
 ```
 
-### `yore backlinks`
+---
 
-Find all files that link to a specific file.
+### 7.8 `yore backlinks`
+
+Lists all documents that link to a specified file.
 
 ```bash
 yore backlinks <file> --index <index-dir>
 ```
 
-**Options:**
-- `--json` - Output as JSON
+**Key options**
 
-**Use case:** Determine safe deletion - see what needs updating before removing a file.
+* `--json` – Emit JSON output
 
-**Example:**
+This is useful for safe deletion or refactoring: you can see which documents reference a given file before modifying or removing it.
+
+**Example**
+
 ```bash
 yore backlinks docs/architecture/DEPLOYMENT-GUIDE.md --index docs/.index
 ```
 
-### `yore orphans`
+---
 
-Find files with no inbound links (potential cleanup candidates).
+### 7.9 `yore orphans`
+
+Finds documents with no inbound links (potential cleanup candidates or undocumented islands).
 
 ```bash
 yore orphans --index <index-dir>
 ```
 
-**Options:**
-- `--json` - Output as JSON
-- `--exclude, -e` - Exclude files matching pattern (repeatable)
+**Key options**
 
-**Output:** Lists orphaned files with size and line count.
+* `--json` – Emit JSON output
+* `--exclude, -e` – Exclude files matching a pattern (repeatable), for example `README` or `INDEX`
 
-**Example:**
+**Example**
+
 ```bash
 # Find orphans excluding README and INDEX files
 yore orphans --index docs/.index --exclude README --exclude INDEX
 ```
 
-### `yore canonicality`
+---
 
-Score documents by authority and trustworthiness based on location and naming.
+### 7.10 `yore canonicality`
+
+Reports canonicality scores for documents based on path, naming, and other trust signals.
 
 ```bash
 yore canonicality --index <index-dir>
 ```
 
-**Options:**
-- `--json` - Output as JSON
-- `--threshold, -t` - Minimum score threshold (0.0 to 1.0, default: 0.0)
+**Key options**
 
-**Scoring factors:**
-- Architecture/ADR documents (+0.2)
-- Index documents (+0.15)
-- README/Guide/Runbook (+0.1)
-- Scratch/Archive/Old (-0.3)
-- Deprecated/Backup (-0.25)
+* `--json` – Emit JSON output
+* `--threshold, -t` – Minimum score threshold (0.0–1.0, default: 0.0)
 
-**Use case:** Resolve conflicting information by trusting higher-canonicality sources.
+**Scoring factors** (example configuration):
 
-**Example:**
+* Architecture / ADR directories: +0.20
+* Index / overview documents: +0.15
+* README / Guide / Runbook filenames: +0.10
+* Scratch / archive / old directories: −0.30
+* Deprecated / backup indicators: −0.25
+
+**Example**
+
 ```bash
-# Show only high-authority documents
+# Show only high‑authority documents
 yore canonicality --index docs/.index --threshold 0.7
 ```
 
-## Use Cases
+---
 
-### Documentation Cleanup
+## 8. Use Cases
 
-Find and consolidate duplicate sections:
+### Documentation cleanup
+
+Use duplicate and orphan detection to simplify and de‑duplicate the documentation tree.
 
 ```bash
-# Find duplicate sections
+# Duplicate sections (raw)
+yore dupes-sections --index docs/.index --json
+
+# Wrapper script example (if present)
 ./scripts/docs/find-duplicates.sh | jq .
 ```
 
-### LLM Context Assembly
+### LLM‑ready context for agents
 
-Generate precise context for LLM queries:
+Generate precise, high‑signal context for agent tasks:
 
 ```bash
-yore assemble "How do I deploy a new service?" > context.md
+yore assemble "How do I deploy a new service?" \
+  --max-tokens 8000 \
+  --depth 1 \
+  --index docs/.index > context.md
 ```
 
-### Agent Integration
+Agents can treat `context.md` as the only trusted context when answering the question.
 
-Full integration with documentation-steward agent:
+### Documentation‑steward agent integration
 
-**Available commands:**
-- `yore check-links` - Validate all documentation links and anchors
-- `yore backlinks <file>` - Find inbound references before deletion
-- `yore orphans` - Identify unreferenced documents for cleanup
-- `yore canonicality` - Score document authority for conflict resolution
-- `yore dupes-sections` - Find duplicate boilerplate sections
-- `yore dupes` - Find highly similar documents
+Yore is designed to be used as the backing engine for a documentation‑maintenance agent. Typical agent workflows include:
 
-**Wrapper script:** `scripts/docs/find-duplicates.sh` provides automated duplication detection.
+* Validating that all links are resolvable (`yore check-links`).
+* Locating duplicates before consolidation (`yore dupes`, `yore dupes-sections`).
+* Identifying canonical documents for a topic (`yore canonicality`).
+* Discovering orphaned documents (`yore orphans`).
+* Finding all inbound references to a document before moving or deleting it (`yore backlinks`).
 
-## Architecture
+---
 
-### Determinism
+## 9. Determinism and Performance
 
-**Guaranteed deterministic:**
-- Same query + same index → identical context
-- No vector embeddings, no approximate search, no sampling
+Yore is intentionally deterministic:
 
-**Benefits:**
-- Debuggable failures
-- Regression detection
-- Cacheable results
-- Auditable decisions
+* The same index and configuration always produce the same search results and assembled contexts.
+* No embeddings, no approximate nearest neighbor search, and no sampling are used.
 
-### Performance
+This enables:
 
-**Indexing:** 221 files in ~2 seconds
-**Query:** BM25 search <10ms
-**Eval:** 5 questions in 2-3 seconds
+* Reliable regression testing via `yore eval`.
+* Cacheable results in CI or agent pipelines.
+* Predictable behavior for long‑running automation.
 
-## License
+Observed performance characteristics on a mid‑sized corpus (illustrative, not a guarantee):
 
-MIT
+* Indexing approximately 200–300 files: on the order of seconds.
+* Querying with BM25: typically well under 10 ms per query.
+* Evaluation over a small test set: a few seconds.
+
+Actual performance depends on repository size, hardware, and configuration.
+
+---
+
+## 10. License
+
+Yore is licensed under the MIT License.
+
+## 11. References
+
+Yore implements several well-established algorithms and documentation patterns.
+The following references represent the foundational ideas and techniques directly used in Yore’s design and implementation.
+
+### Core Ranking and Retrieval
+
+**1. Okapi BM25**
+Robertson, S. E., & Walker, S.
+*Some simple effective approximations to the 2–Poisson model for probabilistic weighted retrieval.*
+SIGIR ’94.
+Defines the BM25 ranking function Yore uses as the primary retrieval model.
+
+### Duplicate and Similarity Detection
+
+**2. MinHash & Locality-Sensitive Hashing (LSH)**
+Broder, A.
+*On the resemblance and containment of documents.*
+Compression and Complexity of Sequences 1997.
+Introduces MinHash, used in Yore for approximate Jaccard similarity.
+
+**3. SimHash**
+Charikar, M.
+*Similarity estimation techniques from rounding algorithms.*
+STOC 2002.
+Defines SimHash, which Yore uses for near-duplicate and section-level similarity detection.
+
+### Documentation Structure and Cross-Referencing
+
+**4. Architecture Decision Records (ADR pattern)**
+Nygard, Michael.
+*Documenting Architecture Decisions.*
+2011.
+Establishes the ADR format that Yore recognizes, parses, and expands during cross-reference resolution.
+
+### Extractive Techniques for High-Signal Summaries
+
+**5. TextRank (Sentence Ranking for Extractive Summaries)**
+Mihalcea, R., & Tarau, P.
+*TextRank: Bringing Order into Texts.*
+EMNLP 2004.
+Provides the conceptual basis for Yore’s sentence-level scoring and extractive refinement.
