@@ -187,6 +187,37 @@ enum Commands {
         #[arg(short, long, default_value = ".yore")]
         index: PathBuf,
     },
+
+    /// Evaluate retrieval pipeline against test questions
+    Eval {
+        /// Path to questions JSONL file
+        #[arg(short, long, default_value = "evaluation/questions.jsonl")]
+        questions: PathBuf,
+
+        /// Index directory
+        #[arg(short, long, default_value = ".yore")]
+        index: PathBuf,
+    },
+}
+
+// Evaluation structures
+#[derive(Serialize, Deserialize, Debug, Clone)]
+struct Question {
+    id: usize,
+    q: String,
+    expect: Vec<String>,
+    #[serde(default)]
+    min_hits: Option<usize>,
+}
+
+#[derive(Debug, Clone)]
+struct EvalResult {
+    id: usize,
+    question: String,
+    hits: usize,
+    total: usize,
+    passed: bool,
+    tokens: usize,
 }
 
 // Index structures
@@ -296,6 +327,9 @@ fn main() {
         }
         Commands::Assemble { query, max_tokens, max_sections, depth, format, index } => {
             cmd_assemble(&query.join(" "), max_tokens, max_sections, depth, &format, &index)
+        }
+        Commands::Eval { questions, index } => {
+            cmd_eval(&questions, &index)
         }
     };
 
@@ -2700,6 +2734,156 @@ fn cmd_assemble(
     let digest = distill_to_markdown(&refined_sections, query, max_tokens);
 
     println!("{}", digest);
+
+    Ok(())
+}
+
+/// Evaluation command handler - runs retrieval pipeline against test questions
+fn cmd_eval(
+    questions_path: &Path,
+    index_dir: &Path,
+) -> Result<(), Box<dyn std::error::Error>> {
+    // Load questions from JSONL file
+    let questions_content = fs::read_to_string(questions_path)?;
+    let questions: Vec<Question> = questions_content
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .map(|line| serde_json::from_str(line))
+        .collect::<Result<Vec<_>, _>>()?;
+
+    if questions.is_empty() {
+        println!("No questions found in {}", questions_path.display());
+        return Ok(());
+    }
+
+    // Load index once
+    let forward_index = load_forward_index(index_dir)?;
+
+    // Run evaluation for each question
+    let mut results = Vec::new();
+
+    for question in &questions {
+        // Run assemble internally (capture output as string)
+        let primary_sections = search_relevant_sections(&question.q, &forward_index, 20);
+
+        if primary_sections.is_empty() {
+            results.push(EvalResult {
+                id: question.id,
+                question: question.q.clone(),
+                hits: 0,
+                total: question.expect.len(),
+                passed: false,
+                tokens: 0,
+            });
+            continue;
+        }
+
+        let primary_tokens: usize = primary_sections
+            .iter()
+            .map(|s| estimate_tokens(&s.content))
+            .sum();
+
+        // Cross-reference expansion
+        let mut all_sections = primary_sections.clone();
+        let adr_index = build_adr_index(&forward_index);
+        let crossrefs = collect_crossrefs(&primary_sections, &adr_index);
+
+        const XREF_TOKEN_FRACTION: f64 = 0.3;
+        const XREF_TOKEN_ABS_MAX: usize = 2000;
+        let max_tokens: usize = 8000; // Default for eval
+
+        let xref_cap = ((max_tokens as f64 * XREF_TOKEN_FRACTION) as usize).min(XREF_TOKEN_ABS_MAX);
+        let remaining_tokens = max_tokens.saturating_sub(primary_tokens);
+        let xref_token_budget = remaining_tokens.min(xref_cap);
+
+        if xref_token_budget > 0 && !crossrefs.is_empty() {
+            let primary_docs: HashSet<String> = primary_sections
+                .iter()
+                .map(|s| s.doc_path.clone())
+                .collect();
+
+            let xref_sections = resolve_crossrefs(
+                &crossrefs,
+                &primary_docs,
+                &forward_index,
+                xref_token_budget,
+            );
+
+            all_sections.extend(xref_sections);
+        }
+
+        // Extractive refinement
+        let max_tokens_per_section = max_tokens / all_sections.len().max(1);
+        let refined_sections = apply_extractive_refiner(all_sections, &question.q, max_tokens_per_section);
+
+        // Distill to markdown
+        let digest = distill_to_markdown(&refined_sections, &question.q, max_tokens);
+
+        // Check coverage of expected substrings
+        let digest_lower = digest.to_lowercase();
+        let hits = question
+            .expect
+            .iter()
+            .filter(|e| digest_lower.contains(&e.to_lowercase()))
+            .count();
+
+        let min_hits = question.min_hits.unwrap_or(question.expect.len());
+        let passed = hits >= min_hits;
+        let tokens = estimate_tokens(&digest);
+
+        results.push(EvalResult {
+            id: question.id,
+            question: question.q.clone(),
+            hits,
+            total: question.expect.len(),
+            passed,
+            tokens,
+        });
+    }
+
+    // Print results
+    println!("\n{}", "Evaluation Results".cyan().bold());
+    println!("{}", "=".repeat(60));
+    println!();
+
+    for result in &results {
+        let status = if result.passed {
+            "✓".green().bold()
+        } else {
+            "✗".red().bold()
+        };
+
+        println!("[{}] {}", result.id, result.question.white().bold());
+        println!("  - hits: {}/{} {}", result.hits, result.total, status);
+        println!("  - size: {} tokens", result.tokens);
+        println!();
+    }
+
+    // Print summary
+    let passed = results.iter().filter(|r| r.passed).count();
+    let total = results.len();
+    let pass_rate = (passed as f64 / total as f64 * 100.0) as usize;
+
+    println!("{}", "=".repeat(60));
+    println!("{}", "Summary".cyan().bold());
+    println!("  Passed: {}/{} ({}%)", passed, total, pass_rate);
+    println!("  Failed: {}/{}", total - passed, total);
+    println!();
+
+    if passed < total {
+        println!("{}", "Failed Questions:".yellow().bold());
+        for result in &results {
+            if !result.passed {
+                println!("  - [{}] {} (hits: {}/{})",
+                    result.id,
+                    result.question,
+                    result.hits,
+                    result.total
+                );
+            }
+        }
+        println!();
+    }
 
     Ok(())
 }

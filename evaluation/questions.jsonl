@@ -1,0 +1,5 @@
+{"id": 1, "q": "How does the authentication system work?", "expect": ["session", "authentication", "token"], "min_hits": 2}
+{"id": 2, "q": "How do I deploy a new service?", "expect": ["deploy", "kubernetes", "service"], "min_hits": 2}
+{"id": 3, "q": "How are tests executed in Kubernetes?", "expect": ["test", "kubernetes", "job", "pod"], "min_hits": 3}
+{"id": 4, "q": "What is the session isolation problem?", "expect": ["session", "isolation", "global", "state"], "min_hits": 3}
+{"id": 5, "q": "How does the deployment coordinator work?", "expect": ["deployment", "coordinator", "kubernetes"], "min_hits": 2}
