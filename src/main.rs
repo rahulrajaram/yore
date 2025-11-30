@@ -652,10 +652,14 @@ fn cmd_build(
         }
     }
 
-    // Compute IDF scores
+    // Compute IDF scores (with floor to handle high-frequency terms)
     let mut idf_map: HashMap<String, f64> = HashMap::new();
     for (term, df) in doc_frequencies {
-        let idf = ((total_docs - df as f64 + 0.5) / (df as f64 + 0.5)).ln();
+        // Standard BM25 IDF can go negative when df > 50% of docs.
+        // We floor at a small positive value so common terms still contribute.
+        let idf = ((total_docs - df as f64 + 0.5) / (df as f64 + 0.5))
+            .ln()
+            .max(0.1);
         idf_map.insert(term, idf);
     }
 
