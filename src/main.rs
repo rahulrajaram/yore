@@ -1493,3 +1493,390 @@ fn chrono_now() -> String {
     let duration = SystemTime::now().duration_since(UNIX_EPOCH).unwrap();
     format!("{}", duration.as_secs())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_jaccard_similarity() {
+        let set1: HashSet<String> = ["foo", "bar", "baz"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        let set2: HashSet<String> = ["bar", "baz", "qux"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+
+        let sim = jaccard_similarity(&set1, &set2);
+        // Intersection: {bar, baz} = 2
+        // Union: {foo, bar, baz, qux} = 4
+        // Jaccard: 2/4 = 0.5
+        assert_eq!(sim, 0.5);
+
+        // Empty sets
+        let empty1: HashSet<String> = HashSet::new();
+        let empty2: HashSet<String> = HashSet::new();
+        assert_eq!(jaccard_similarity(&empty1, &empty2), 0.0);
+
+        // Identical sets
+        assert_eq!(jaccard_similarity(&set1, &set1), 1.0);
+    }
+
+    #[test]
+    fn test_simhash_similarity() {
+        // Identical hashes
+        assert_eq!(simhash_similarity(0x123456, 0x123456), 1.0);
+
+        // Completely different (all bits flipped)
+        let hash1 = 0x0000000000000000u64;
+        let hash2 = 0xFFFFFFFFFFFFFFFFu64;
+        assert_eq!(simhash_similarity(hash1, hash2), 0.0);
+
+        // 1 bit different out of 64
+        let hash_a = 0b0000000000000000u64;
+        let hash_b = 0b0000000000000001u64;
+        let sim = simhash_similarity(hash_a, hash_b);
+        assert!((sim - (63.0 / 64.0)).abs() < 0.01);
+    }
+
+    #[test]
+    fn test_hamming_distance() {
+        assert_eq!(hamming_distance(0b1010, 0b1010), 0);
+        assert_eq!(hamming_distance(0b1010, 0b0101), 4);
+        assert_eq!(hamming_distance(0b1111, 0b0000), 4);
+        assert_eq!(hamming_distance(0b1100, 0b1010), 2);
+    }
+
+    #[test]
+    fn test_compute_simhash_stability() {
+        let text1 = "The quick brown fox jumps over the lazy dog";
+        let text2 = "The quick brown fox jumps over the lazy dog";
+
+        let hash1 = compute_simhash(text1);
+        let hash2 = compute_simhash(text2);
+
+        // Identical text should produce identical hashes
+        assert_eq!(hash1, hash2);
+    }
+
+    #[test]
+    fn test_compute_simhash_similarity() {
+        let text1 = "machine learning algorithms";
+        let text2 = "machine learning systems";
+        let text3 = "completely different topic about cooking";
+
+        let hash1 = compute_simhash(text1);
+        let hash2 = compute_simhash(text2);
+        let hash3 = compute_simhash(text3);
+
+        // Similar texts should have high similarity
+        let sim_similar = simhash_similarity(hash1, hash2);
+        // Different texts should have lower similarity
+        let sim_different = simhash_similarity(hash1, hash3);
+
+        assert!(sim_similar > sim_different);
+        assert!(sim_similar > 0.5); // Similar texts should be > 50% similar
+    }
+
+    #[test]
+    fn test_minhash_basic() {
+        let keywords1 = vec!["foo".to_string(), "bar".to_string(), "baz".to_string()];
+        let keywords2 = vec!["foo".to_string(), "bar".to_string(), "baz".to_string()];
+
+        let mh1 = compute_minhash(&keywords1, 128);
+        let mh2 = compute_minhash(&keywords2, 128);
+
+        // Same keywords should produce same MinHash
+        assert_eq!(mh1, mh2);
+        assert_eq!(mh1.len(), 128);
+
+        // Similarity should be 1.0
+        assert_eq!(minhash_similarity(&mh1, &mh2), 1.0);
+    }
+
+    #[test]
+    fn test_minhash_similarity_estimation() {
+        let keywords1 = vec!["a".to_string(), "b".to_string(), "c".to_string()];
+        let keywords2 = vec!["b".to_string(), "c".to_string(), "d".to_string()];
+        let keywords3 = vec!["x".to_string(), "y".to_string(), "z".to_string()];
+
+        let mh1 = compute_minhash(&keywords1, 128);
+        let mh2 = compute_minhash(&keywords2, 128);
+        let mh3 = compute_minhash(&keywords3, 128);
+
+        // keywords1 and keywords2 share 2 out of 4 unique items = 0.5 Jaccard
+        let sim_similar = minhash_similarity(&mh1, &mh2);
+        // keywords1 and keywords3 share 0 items
+        let sim_different = minhash_similarity(&mh1, &mh3);
+
+        // Similar sets should have higher MinHash similarity
+        assert!(sim_similar > sim_different);
+        // MinHash should approximate Jaccard (within reasonable error)
+        assert!(sim_similar > 0.3 && sim_similar < 0.7); // Approximately 0.5
+    }
+
+    #[test]
+    fn test_lsh_buckets() {
+        let mut files = HashMap::new();
+
+        // Create 3 files with MinHash signatures
+        let keywords1 = vec!["foo".to_string(), "bar".to_string(), "baz".to_string()];
+        let keywords2 = vec!["foo".to_string(), "bar".to_string(), "baz".to_string()];
+        let keywords3 = vec!["completely".to_string(), "different".to_string()];
+
+        files.insert(
+            "file1.md".to_string(),
+            FileEntry {
+                path: "file1.md".to_string(),
+                size_bytes: 100,
+                line_count: 10,
+                headings: vec![],
+                keywords: keywords1.clone(),
+                body_keywords: vec![],
+                links: vec![],
+                simhash: 0,
+                term_frequencies: HashMap::new(),
+                doc_length: 0,
+                minhash: compute_minhash(&keywords1, 128),
+                section_fingerprints: vec![],
+            },
+        );
+
+        files.insert(
+            "file2.md".to_string(),
+            FileEntry {
+                path: "file2.md".to_string(),
+                size_bytes: 100,
+                line_count: 10,
+                headings: vec![],
+                keywords: keywords2.clone(),
+                body_keywords: vec![],
+                links: vec![],
+                simhash: 0,
+                term_frequencies: HashMap::new(),
+                doc_length: 0,
+                minhash: compute_minhash(&keywords2, 128),
+                section_fingerprints: vec![],
+            },
+        );
+
+        files.insert(
+            "file3.md".to_string(),
+            FileEntry {
+                path: "file3.md".to_string(),
+                size_bytes: 100,
+                line_count: 10,
+                headings: vec![],
+                keywords: keywords3.clone(),
+                body_keywords: vec![],
+                links: vec![],
+                simhash: 0,
+                term_frequencies: HashMap::new(),
+                doc_length: 0,
+                minhash: compute_minhash(&keywords3, 128),
+                section_fingerprints: vec![],
+            },
+        );
+
+        let buckets = lsh_buckets(&files, 16);
+
+        // Should create some buckets
+        assert!(!buckets.is_empty());
+
+        // file1 and file2 should likely be in the same bucket (identical MinHash)
+        // Check if they appear together in any bucket
+        let mut file1_file2_together = false;
+        for paths in buckets.values() {
+            if paths.contains(&"file1.md".to_string()) && paths.contains(&"file2.md".to_string()) {
+                file1_file2_together = true;
+                break;
+            }
+        }
+        assert!(file1_file2_together, "Identical files should be in same LSH bucket");
+    }
+
+    #[test]
+    fn test_bm25_score_basic() {
+        let mut term_freq = HashMap::new();
+        term_freq.insert("test".to_string(), 5);
+        term_freq.insert("word".to_string(), 2);
+
+        let doc = FileEntry {
+            path: "test.md".to_string(),
+            size_bytes: 100,
+            line_count: 10,
+            headings: vec![],
+            keywords: vec![],
+            body_keywords: vec![],
+            links: vec![],
+            simhash: 0,
+            term_frequencies: term_freq,
+            doc_length: 100,
+            minhash: vec![],
+            section_fingerprints: vec![],
+        };
+
+        let mut idf_map = HashMap::new();
+        idf_map.insert("test".to_string(), 2.5);
+        idf_map.insert("word".to_string(), 1.8);
+
+        let query = vec!["test".to_string()];
+        let score = bm25_score(&query, &doc, 100.0, &idf_map);
+
+        // Score should be > 0 for matching term
+        assert!(score > 0.0);
+
+        // Query with no matching terms should score 0
+        let empty_query = vec!["nonexistent".to_string()];
+        let zero_score = bm25_score(&empty_query, &doc, 100.0, &idf_map);
+        assert_eq!(zero_score, 0.0);
+    }
+
+    #[test]
+    fn test_bm25_score_ordering() {
+        // Document with high term frequency
+        let mut tf_high = HashMap::new();
+        tf_high.insert("test".to_string(), 10);
+
+        let doc_high_tf = FileEntry {
+            path: "high.md".to_string(),
+            size_bytes: 100,
+            line_count: 10,
+            headings: vec![],
+            keywords: vec![],
+            body_keywords: vec![],
+            links: vec![],
+            simhash: 0,
+            term_frequencies: tf_high,
+            doc_length: 50,
+            minhash: vec![],
+            section_fingerprints: vec![],
+        };
+
+        // Document with low term frequency
+        let mut tf_low = HashMap::new();
+        tf_low.insert("test".to_string(), 1);
+
+        let doc_low_tf = FileEntry {
+            path: "low.md".to_string(),
+            size_bytes: 100,
+            line_count: 10,
+            headings: vec![],
+            keywords: vec![],
+            body_keywords: vec![],
+            links: vec![],
+            simhash: 0,
+            term_frequencies: tf_low,
+            doc_length: 50,
+            minhash: vec![],
+            section_fingerprints: vec![],
+        };
+
+        let mut idf_map = HashMap::new();
+        idf_map.insert("test".to_string(), 2.0);
+
+        let query = vec!["test".to_string()];
+        let score_high = bm25_score(&query, &doc_high_tf, 50.0, &idf_map);
+        let score_low = bm25_score(&query, &doc_low_tf, 50.0, &idf_map);
+
+        // Higher term frequency should yield higher BM25 score
+        assert!(score_high > score_low);
+    }
+
+    #[test]
+    fn test_index_sections() {
+        let content = "# Introduction\nThis is the intro.\n\n## Details\nMore details here.\n\n## Summary\nFinal thoughts.";
+        let headings = vec![
+            Heading {
+                line: 1,
+                level: 1,
+                text: "Introduction".to_string(),
+            },
+            Heading {
+                line: 4,
+                level: 2,
+                text: "Details".to_string(),
+            },
+            Heading {
+                line: 7,
+                level: 2,
+                text: "Summary".to_string(),
+            },
+        ];
+
+        let sections = index_sections(content, &headings);
+
+        assert_eq!(sections.len(), 3);
+        assert_eq!(sections[0].heading, "Introduction");
+        assert_eq!(sections[0].level, 1);
+        assert_eq!(sections[0].line_start, 1);
+
+        assert_eq!(sections[1].heading, "Details");
+        assert_eq!(sections[1].level, 2);
+        assert_eq!(sections[1].line_start, 4);
+
+        assert_eq!(sections[2].heading, "Summary");
+        assert_eq!(sections[2].level, 2);
+    }
+
+    #[test]
+    fn test_index_sections_similar_content() {
+        let content1 = "## Testing\nRun the tests with:\n```\npytest\n```";
+        let content2 = "## Testing\nRun the tests with:\n```\npytest\n```";
+        let content3 = "## Testing\nCompletely different content about testing";
+
+        let headings1 = vec![Heading { line: 1, level: 2, text: "Testing".to_string() }];
+        let headings2 = vec![Heading { line: 1, level: 2, text: "Testing".to_string() }];
+        let headings3 = vec![Heading { line: 1, level: 2, text: "Testing".to_string() }];
+
+        let sections1 = index_sections(content1, &headings1);
+        let sections2 = index_sections(content2, &headings2);
+        let sections3 = index_sections(content3, &headings3);
+
+        // Identical content should produce identical SimHash
+        assert_eq!(sections1[0].simhash, sections2[0].simhash);
+
+        // Different content should produce different SimHash
+        assert_ne!(sections1[0].simhash, sections3[0].simhash);
+
+        // Identical sections should have 100% similarity
+        let sim_identical = simhash_similarity(sections1[0].simhash, sections2[0].simhash);
+        assert_eq!(sim_identical, 1.0);
+
+        // Different sections should have < 100% similarity
+        let sim_different = simhash_similarity(sections1[0].simhash, sections3[0].simhash);
+        assert!(sim_different < 1.0);
+    }
+
+    #[test]
+    fn test_extract_keywords() {
+        let text = "This is a TEST document with some KEYWORDS";
+        let keywords = extract_keywords(text);
+
+        // Should lowercase (but not stem - extract_keywords doesn't stem)
+        assert!(keywords.contains(&"test".to_string()));
+        assert!(keywords.contains(&"document".to_string()));
+        assert!(keywords.contains(&"keywords".to_string())); // Note: not stemmed
+
+        // Should not contain stop words
+        assert!(!keywords.contains(&"this".to_string()));
+        assert!(!keywords.contains(&"is".to_string()));
+        // "a" and "with" are too short or stop words
+        assert!(!keywords.contains(&"with".to_string()));
+    }
+
+    #[test]
+    fn test_stem_word() {
+        // Test actual stemming behavior
+        assert_eq!(stem_word("running"), "runn"); // Simple stemmer removes "ing"
+        assert_eq!(stem_word("tests"), "test");   // Removes "s"
+        assert_eq!(stem_word("testing"), "test"); // Removes "ing"
+        assert_eq!(stem_word("keywords"), "keyword"); // Removes "s"
+
+        // Short words should not be stemmed
+        assert_eq!(stem_word("go"), "go");
+        assert_eq!(stem_word("it"), "it");
+    }
+}
