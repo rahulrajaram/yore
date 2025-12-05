@@ -11,10 +11,65 @@ use std::io::{self, BufRead, Write};
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
-/// yore - Fast document indexer for finding duplicates and searching content
+/// yore – Deterministic documentation indexer and context assembly engine.
+///
+/// Yore indexes markdown and text documentation, computes BM25 statistics,
+/// section fingerprints, link graphs, and canonicality scores, and then
+/// assembles minimal, high‑signal context for large language models (LLMs)
+/// and automation agents.
+///
+/// Typical workflow:
+///   1. Build an index over your docs with `yore build`.
+///   2. Inspect and clean the docs with `query`, `dupes*`, `check-links`,
+///      `backlinks`, `orphans`, and `canonicality`.
+///   3. Assemble an answer‑ready context for an LLM with `yore assemble`.
+///
+/// All commands are deterministic and operate over the on‑disk index in
+/// `--index` (default: `.yore`).
 #[derive(Parser)]
-#[command(name = "yore")]
-#[command(author, version, about, long_about = None)]
+#[command(
+    name = "yore",
+    author,
+    version,
+    about = "Fast, deterministic documentation indexer and LLM context assembler",
+    long_about = r#"yore is a deterministic documentation indexer and context
+assembly engine for large language models (LLMs) and automation agents.
+
+It walks a documentation tree, builds on-disk forward and reverse indexes
+(BM25 term statistics, section fingerprints, link graphs, canonicality scores),
+and then assembles minimal, high-signal context for a given question.
+
+Typical workflow:
+  1. Build an index over your docs with `yore build`.
+  2. Inspect and clean the docs using `query`, `dupes*`, `check-links`,
+     `backlinks`, `orphans`, and `canonicality`.
+  3. Assemble an answer-ready context for an LLM with `yore assemble`.
+
+All commands operate deterministically over the on-disk index in `--index`
+(default: `.yore`)."#,
+    after_long_help = r#"EXAMPLES
+
+  Build an index over docs/ and write it to .yore:
+    yore build docs --output .yore --types md,txt
+
+  Search the index for a free-text query:
+    yore query kubernetes deployment --index .yore --limit 5
+
+  Assemble context for an LLM question:
+    yore assemble "How does authentication work?" \
+      --index .yore --max-tokens 8000 --depth 1 > context.md
+
+  Evaluate retrieval quality against a questions file:
+    yore eval --questions questions.jsonl --index .yore
+
+  Inspect structure and documentation quality:
+    yore dupes --index .yore
+    yore dupes-sections --index .yore --threshold 0.7
+    yore check-links --index .yore --json
+    yore backlinks docs/architecture/DEPLOYMENT-GUIDE.md --index .yore
+    yore orphans --index .yore --exclude README
+    yore canonicality --index .yore --threshold 0.7"#
+)]
 struct Cli {
     #[command(subcommand)]
     command: Commands,
@@ -30,7 +85,17 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
-    /// Build forward and reverse indexes
+    /// Build forward and reverse indexes over documentation.
+    ///
+    /// Walks a directory tree, indexes Markdown/text files, and writes
+    /// forward and reverse indexes into `--output` (default: `.yore`).
+    ///
+    /// Agents typically run this once at startup or as part of CI, then
+    /// call other commands (`query`, `assemble`, `dupes*`, etc.) against
+    /// the resulting index.
+    ///
+    /// Example:
+    ///   yore build docs --output .yore --types md,txt
     Build {
         /// Path to index
         #[arg(default_value = ".")]
@@ -49,7 +114,16 @@ enum Commands {
         exclude: Vec<String>,
     },
 
-    /// Search the index for keywords
+    /// Search the index for relevant documents using BM25.
+    ///
+    /// Accepts free-text terms, ranks documents with BM25 using the
+    /// precomputed index, and optionally returns machine-readable JSON.
+    ///
+    /// Useful for quick inspection by humans and for agents that want to
+    /// select candidate files before assembling full context.
+    ///
+    /// Example:
+    ///   yore query kubernetes deployment --index .yore --limit 5
     Query {
         /// Search terms
         terms: Vec<String>,
@@ -71,7 +145,16 @@ enum Commands {
         index: PathBuf,
     },
 
-    /// Find documents similar to a reference file
+    /// Find documents similar to a reference file.
+    ///
+    /// Uses both keyword overlap and SimHash fingerprints to identify
+    /// documents that are textually similar to the given file.
+    ///
+    /// Useful for de-duplicating design docs, spotting outdated copies,
+    /// or finding related ADRs and guides.
+    ///
+    /// Example:
+    ///   yore similar docs/adr/ADR-0013-retries.md --index .yore --limit 5
     Similar {
         /// Reference file
         file: PathBuf,
@@ -93,7 +176,16 @@ enum Commands {
         index: PathBuf,
     },
 
-    /// Find duplicate/overlapping documents
+    /// Find duplicate or heavily overlapping documents.
+    ///
+    /// Groups or lists documents that share a large fraction of content,
+    /// based on MinHash and SimHash signatures stored in the index.
+    ///
+    /// Useful for documentation cleanup and for agents choosing which
+    /// version of a document to treat as canonical.
+    ///
+    /// Example:
+    ///   yore dupes --index .yore --threshold 0.35 --group
     Dupes {
         /// Similarity threshold (0.0 to 1.0)
         #[arg(short, long, default_value = "0.35")]
@@ -112,7 +204,17 @@ enum Commands {
         index: PathBuf,
     },
 
-    /// Find duplicate sections across documents
+    /// Find duplicate sections across documents.
+    ///
+    /// Identifies individual sections (for example headings and their
+    /// bodies) that appear in multiple files, even when the files are
+    /// otherwise different.
+    ///
+    /// Helpful for detecting repeated how-to blocks, copy-pasted API
+    /// descriptions, or repeated ADR fragments.
+    ///
+    /// Example:
+    ///   yore dupes-sections --index .yore --threshold 0.7 --min-files 2
     DupesSections {
         /// Similarity threshold (0.0 to 1.0)
         #[arg(short, long, default_value = "0.7")]
@@ -131,7 +233,13 @@ enum Commands {
         index: PathBuf,
     },
 
-    /// Show what's shared between two files
+    /// Show overlapping content and shared sections between two files.
+    ///
+    /// Compares two files using the index and reports what content they
+    /// share, helping you understand drift or duplication between them.
+    ///
+    /// Example:
+    ///   yore diff docs/old.md docs/new.md --index .yore
     Diff {
         /// First file
         file1: PathBuf,
@@ -144,7 +252,13 @@ enum Commands {
         index: PathBuf,
     },
 
-    /// Show index statistics
+    /// Show high-level index statistics.
+    ///
+    /// Prints counts of files, headings, links, and top keywords, which
+    /// is useful for sanity-checking an index and monitoring drift over time.
+    ///
+    /// Example:
+    ///   yore stats --index .yore --top-keywords 20
     Stats {
         /// Show top N keywords
         #[arg(long, default_value = "20")]
@@ -155,14 +269,31 @@ enum Commands {
         index: PathBuf,
     },
 
-    /// Interactive query mode
+    /// Interactive query REPL over the index.
+    ///
+    /// Starts a simple read-eval-print loop where you can type queries
+    /// and inspect results quickly while iterating on documentation.
+    ///
+    /// Example:
+    ///   yore repl --index .yore
     Repl {
         /// Index directory
         #[arg(short, long, default_value = ".yore")]
         index: PathBuf,
     },
 
-    /// Assemble context digest for LLM consumption
+    /// Assemble a high-signal context digest for LLM consumption.
+    ///
+    /// Runs the full retrieval pipeline: BM25 ranking, section selection,
+    /// link and ADR expansion, extractive refinement, and token-budgeted
+    /// trimming to produce a markdown context for a natural language query.
+    ///
+    /// This is the primary entry point for agents and tools that want a
+    /// deterministic, reproducible context to send to an LLM.
+    ///
+    /// Example:
+    ///   yore assemble "How does authentication work?" \
+    ///     --index .yore --max-tokens 8000 --depth 1 > context.md
     Assemble {
         /// Natural language query/question
         query: Vec<String>,
@@ -188,7 +319,17 @@ enum Commands {
         index: PathBuf,
     },
 
-    /// Evaluate retrieval pipeline against test questions
+    /// Evaluate the retrieval pipeline against test questions.
+    ///
+    /// Given a JSONL questions file with expected substrings, runs the
+    /// same retrieval/assembly pipeline used by `assemble` and reports
+    /// whether each question's expected answers were retrieved.
+    ///
+    /// Useful for regression testing and measuring improvements to docs
+    /// or index configuration.
+    ///
+    /// Example:
+    ///   yore eval --questions questions.jsonl --index .yore
     Eval {
         /// Path to questions JSONL file
         #[arg(short, long, default_value = "questions.jsonl")]
@@ -199,7 +340,16 @@ enum Commands {
         index: PathBuf,
     },
 
-    /// Check all markdown links for validity
+    /// Check all markdown links for validity.
+    ///
+    /// Parses all markdown links in indexed documents, resolves relative and
+    /// absolute paths, and reports broken targets and anchors.
+    ///
+    /// Can emit JSON for automated checks in CI or for agents that want to
+    /// repair links automatically.
+    ///
+    /// Example:
+    ///   yore check-links --index .yore --json
     CheckLinks {
         /// Index directory
         #[arg(short, long, default_value = ".yore")]
@@ -214,7 +364,16 @@ enum Commands {
         root: Option<PathBuf>,
     },
 
-    /// Find all files that link to a specific file
+    /// Find all files that link to a specific file.
+    ///
+    /// Traverses the link graph to list every document that links to the
+    /// given target file, including optional anchors.
+    ///
+    /// Useful for understanding impact of changes, cleaning up docs, and
+    /// deciding whether a document is safe to delete.
+    ///
+    /// Example:
+    ///   yore backlinks docs/architecture/DEPLOYMENT-GUIDE.md --index .yore
     Backlinks {
         /// File to find backlinks for
         file: String,
@@ -228,7 +387,16 @@ enum Commands {
         json: bool,
     },
 
-    /// Find orphaned files with no inbound links
+    /// Find orphaned files with no inbound links.
+    ///
+    /// Lists documents that are not linked to from anywhere else in the
+    /// documentation graph (subject to `--exclude` filters).
+    ///
+    /// Helpful for identifying dead, experimental, or forgotten documents
+    /// that may be candidates for deletion or consolidation.
+    ///
+    /// Example:
+    ///   yore orphans --index .yore --exclude README
     Orphans {
         /// Index directory
         #[arg(short, long, default_value = ".yore")]
@@ -243,7 +411,14 @@ enum Commands {
         exclude: Vec<String>,
     },
 
-    /// Show canonicality scores for all documents
+    /// Show canonicality scores for all documents.
+    ///
+    /// Computes a heuristic "authority" score per document based on naming,
+    /// path, and link structure so agents can consistently pick canonical
+    /// sources of truth when multiple documents overlap.
+    ///
+    /// Example:
+    ///   yore canonicality --index .yore --threshold 0.7
     Canonicality {
         /// Index directory
         #[arg(short, long, default_value = ".yore")]

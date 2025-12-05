@@ -214,6 +214,11 @@ yore canonicality --index docs/.index --threshold 0.7
 
 This section provides a concise reference for each major command. All commands that operate on an index accept `--index <index-dir>`.
 
+For the most up-to-date, agent-friendly documentation for each command, you can also use the built-in help:
+
+- `yore --help` – High-level overview, workflow, and examples
+- `yore help <command>` – Manpage-style description, options, and usage examples for a specific subcommand (for example, `yore help assemble`)
+
 ### 7.1 `yore build`
 
 Builds a forward and reverse index over a directory tree.
