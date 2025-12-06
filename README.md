@@ -383,6 +383,7 @@ yore check-links --index <index-dir>
 
 * `--json` – Emit machine‑readable JSON
 * `--root, -r` – Root directory for resolving relative paths (if different from index root)
+* `--summary` / `--summary-only` – Include or show only a grouped summary by file and by kind (`doc_missing`, `code_missing`, `placeholder`, etc.)
 
 The command reports broken links, missing target files, and invalid anchors, including source file and line location.
 
@@ -468,7 +469,39 @@ yore canonicality --index docs/.index --threshold 0.7
 
 ---
 
-## 8. Use Cases
+## 8. Configuration and Profiles
+
+Yore can optionally be configured via a `.yore.toml` file at the repository root. This allows you to define named index profiles and reuse them across commands.
+
+```toml
+[index.docs]
+roots = ["docs"]
+types = ["md"]
+output = "docs/.index"
+
+[index.docs_plus_agents]
+roots = ["docs", "agents"]
+types = ["md"]
+output = ".yore-docs-plus-agents"
+```
+
+You can then reference these profiles from the CLI:
+
+```bash
+# Build the docs-only index defined above
+yore --profile docs build
+
+# Run link checks against the docs profile without spelling out --index
+yore --profile docs check-links --json --summary
+```
+
+CLI flags always override profile settings when explicitly provided (for example, passing `--index` or `--types`).
+
+> **Important:** Profiles control which roots are indexed. If you care about reviewing **all** documentation (including scattered notes, ADRs, and embedded docs), make sure you also have a full-repo profile (for example, `roots = ["."]`) or run `yore build .` without a profile. Overly narrow profiles will cause Yore to ignore files outside the declared roots, which is useful for focused checks but detrimental for whole-repo documentation review.
+
+---
+
+## 9. Use Cases
 
 ### Documentation cleanup
 
@@ -507,7 +540,7 @@ Yore is designed to be used as the backing engine for a documentation‑maintena
 
 ---
 
-## 9. Determinism and Performance
+## 10. Determinism and Performance
 
 Yore is intentionally deterministic:
 

@@ -78,6 +78,10 @@ struct Cli {
     #[arg(short, long, global = true, default_value = ".yore.toml")]
     config: PathBuf,
 
+    /// Profile name to load from config (limits which roots are indexed; use a full-root profile for whole-repo review)
+    #[arg(long, global = true)]
+    profile: Option<String>,
+
     /// Quiet mode - suppress non-essential output
     #[arg(short, long, global = true)]
     quiet: bool,
@@ -346,10 +350,15 @@ enum Commands {
     /// absolute paths, and reports broken targets and anchors.
     ///
     /// Can emit JSON for automated checks in CI or for agents that want to
-    /// repair links automatically.
+    /// repair links automatically, including a grouped summary by file and
+    /// by issue kind (doc_missing, code_missing, placeholder, etc.).
     ///
-    /// Example:
+    /// Examples:
+    ///   # Basic JSON output over default index
     ///   yore check-links --index .yore --json
+    ///
+    ///   # Docs-only profile with summary for CI
+    ///   yore --profile docs check-links --json --summary-only
     CheckLinks {
         /// Index directory
         #[arg(short, long, default_value = ".yore")]
@@ -362,6 +371,14 @@ enum Commands {
         /// Root directory for resolving relative paths
         #[arg(short, long)]
         root: Option<PathBuf>,
+
+        /// Include a grouped summary of link issues
+        #[arg(long)]
+        summary: bool,
+
+        /// Only show the summary (suppress individual link entries)
+        #[arg(long)]
+        summary_only: bool,
     },
 
     /// Find all files that link to a specific file.
@@ -463,6 +480,39 @@ struct BrokenLink {
     link_target: String,
     error: String,
     anchor: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    context: Option<String>,
+}
+
+#[derive(Serialize, Debug, Clone, PartialEq, Eq, Hash)]
+#[serde(rename_all = "snake_case")]
+enum LinkKind {
+    DocMissing,
+    CodeMissing,
+    Placeholder,
+    CodeReference,
+    DirectoryReference,
+    ExternalReference,
+    AnchorMissing,
+    AnchorUnverified,
+}
+
+#[derive(Serialize, Debug)]
+struct LinkSummaryByFile {
+    file: String,
+    counts: HashMap<String, usize>,
+}
+
+#[derive(Serialize, Debug)]
+struct LinkSummaryByKind {
+    kind: String,
+    count: usize,
+}
+
+#[derive(Serialize, Debug)]
+struct LinkCheckSummary {
+    by_file: Vec<LinkSummaryByFile>,
+    by_kind: Vec<LinkSummaryByKind>,
 }
 
 #[derive(Serialize, Debug)]
@@ -471,6 +521,8 @@ struct LinkCheckResult {
     valid_links: usize,
     broken_links: usize,
     broken: Vec<BrokenLink>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    summary: Option<LinkCheckSummary>,
 }
 
 // Backlinks structures
@@ -594,8 +646,137 @@ struct IndexStats {
     indexed_at: String,
 }
 
+#[derive(Deserialize, Debug, Clone)]
+struct IndexProfileConfig {
+    #[serde(default)]
+    roots: Vec<String>,
+    #[serde(default)]
+    types: Vec<String>,
+    output: Option<String>,
+}
+
+#[derive(Deserialize, Debug, Clone)]
+struct YoreConfig {
+    #[serde(default)]
+    index: HashMap<String, IndexProfileConfig>,
+}
+
+fn load_config(path: &Path, quiet: bool) -> Option<YoreConfig> {
+    if !path.exists() {
+        return None;
+    }
+
+    let contents = match fs::read_to_string(path) {
+        Ok(c) => c,
+        Err(e) => {
+            if !quiet {
+                eprintln!(
+                    "{}: failed to read config {}: {}",
+                    "warning".yellow(),
+                    path.display(),
+                    e
+                );
+            }
+            return None;
+        }
+    };
+
+    match toml::from_str::<YoreConfig>(&contents) {
+        Ok(cfg) => Some(cfg),
+        Err(e) => {
+            if !quiet {
+                eprintln!(
+                    "{}: failed to parse config {}: {}",
+                    "warning".yellow(),
+                    path.display(),
+                    e
+                );
+            }
+            None
+        }
+    }
+}
+
+fn resolve_build_params(
+    path: PathBuf,
+    output: PathBuf,
+    types: String,
+    profile: Option<&str>,
+    config: &Option<YoreConfig>,
+) -> (PathBuf, PathBuf, String, Option<Vec<PathBuf>>) {
+    // Defaults from CLI definition
+    let default_path = PathBuf::from(".");
+    let default_output = PathBuf::from(".yore");
+    let default_types = "md,txt,rst".to_string();
+
+    let mut effective_path = path;
+    let mut effective_output = output;
+    let mut effective_types = types;
+    let mut roots: Option<Vec<PathBuf>> = None;
+
+    if let (Some(profile_name), Some(cfg)) = (profile, config.as_ref()) {
+        if let Some(profile_cfg) = cfg.index.get(profile_name) {
+            // Roots: if present, use them as allowed roots (multi-root support)
+            if !profile_cfg.roots.is_empty() {
+                let rs: Vec<PathBuf> = profile_cfg.roots.iter().map(PathBuf::from).collect();
+                roots = Some(rs);
+                // Use repo root (".") as walk root when using multiple roots
+                effective_path = default_path.clone();
+            }
+
+            // Types: only override when CLI used the default
+            if effective_types == default_types && !profile_cfg.types.is_empty() {
+                effective_types = profile_cfg.types.join(",");
+            }
+
+            // Output: only override when CLI used the default
+            if effective_output == default_output {
+                if let Some(ref out) = profile_cfg.output {
+                    effective_output = PathBuf::from(out);
+                }
+            }
+        }
+    }
+
+    (effective_path, effective_output, effective_types, roots)
+}
+
+fn resolve_index_path(
+    index: PathBuf,
+    profile: Option<&str>,
+    config: &Option<YoreConfig>,
+) -> PathBuf {
+    let default_index = PathBuf::from(".yore");
+
+    if index != default_index {
+        return index;
+    }
+
+    if let (Some(profile_name), Some(cfg)) = (profile, config.as_ref()) {
+        if let Some(profile_cfg) = cfg.index.get(profile_name) {
+            if let Some(ref out) = profile_cfg.output {
+                return PathBuf::from(out);
+            }
+        }
+    }
+
+    index
+}
+
 fn main() {
+    // Handle SIGPIPE / broken pipe panics gracefully (e.g., when piping into `head`).
+    let default_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let msg = format!("{}", info);
+        if msg.contains("Broken pipe (os error 32)") {
+            // Treat broken pipe as a normal early exit with success.
+            std::process::exit(0);
+        }
+        default_hook(info);
+    }));
+
     let cli = Cli::parse();
+    let config = load_config(&cli.config, cli.quiet);
 
     let result = match cli.command {
         Commands::Build {
@@ -603,7 +784,11 @@ fn main() {
             output,
             types,
             exclude,
-        } => cmd_build(&path, &output, &types, &exclude, cli.quiet),
+        } => {
+            let (path, output, types, roots) =
+                resolve_build_params(path, output, types, cli.profile.as_deref(), &config);
+            cmd_build(&path, &output, &types, &exclude, cli.quiet, roots.as_deref())
+        }
         Commands::Query {
             terms,
             limit,
@@ -656,8 +841,16 @@ fn main() {
             &index,
         ),
         Commands::Eval { questions, index } => cmd_eval(&questions, &index),
-        Commands::CheckLinks { index, json, root } => {
-            cmd_check_links(&index, json, root.as_deref())
+        Commands::CheckLinks {
+            index,
+            json,
+            root,
+            summary,
+            summary_only,
+        } => {
+            let index_path =
+                resolve_index_path(index, cli.profile.as_deref(), &config);
+            cmd_check_links(&index_path, json, root.as_deref(), summary, summary_only)
         }
         Commands::Backlinks { file, index, json } => cmd_backlinks(&file, &index, json),
         Commands::Orphans {
@@ -684,6 +877,7 @@ fn cmd_build(
     types: &str,
     exclude: &[String],
     quiet: bool,
+    roots: Option<&[PathBuf]>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let start = Instant::now();
 
@@ -726,6 +920,20 @@ fn cmd_build(
         // Skip directories
         if path.is_dir() {
             continue;
+        }
+
+        // If roots are configured, skip files outside those roots
+        if let Some(root_list) = roots {
+            let mut inside_any_root = false;
+            for root in root_list {
+                if path.starts_with(root) {
+                    inside_any_root = true;
+                    break;
+                }
+            }
+            if !inside_any_root {
+                continue;
+            }
         }
 
         // Check extension
@@ -3469,6 +3677,8 @@ fn cmd_check_links(
     index_dir: &Path,
     json: bool,
     root: Option<&Path>,
+    summary_flag: bool,
+    summary_only: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     // Load the forward index
     let forward_index = load_forward_index(index_dir)?;
@@ -3527,6 +3737,13 @@ fn cmd_check_links(
     let mut broken_links = Vec::new();
     let mut total_links = 0;
 
+    // Cache file lines for context snippets
+    let mut file_lines_cache: HashMap<String, Vec<String>> = HashMap::new();
+
+    // Summary accumulators
+    let mut counts_by_file: HashMap<String, HashMap<String, usize>> = HashMap::new();
+    let mut counts_by_kind: HashMap<String, usize> = HashMap::new();
+
     // Iterate through all files and check their links
     for (file_path, entry) in &forward_index.files {
         for link in &entry.links {
@@ -3553,6 +3770,8 @@ fn cmd_check_links(
                 (target.clone(), None)
             };
 
+            let line_number = link.line;
+
             // Resolve relative path
             let resolved_path = if link_path.is_empty() {
                 // Just an anchor in the current file
@@ -3573,17 +3792,86 @@ fn cmd_check_links(
             // Normalize path (remove ./ and resolve ../)
             let normalized_path = normalize_path(Path::new(&resolved_path));
 
-            // Check if file exists
-            if !file_set.contains(&normalized_path) && !link_path.is_empty() {
+            // Placeholder targets: treat as lower-severity broken links
+            if !link_path.is_empty() && is_placeholder_target(&link_path) {
+                let context =
+                    get_link_context(&mut file_lines_cache, file_path, line_number)?;
+                let kind = LinkKind::Placeholder;
+                record_link_kind(
+                    &mut counts_by_file,
+                    &mut counts_by_kind,
+                    file_path,
+                    &kind,
+                );
                 broken_links.push(BrokenLink {
                     source_file: file_path.clone(),
-                    line_number: 0, // We don't track line numbers currently
+                    line_number,
                     link_text: link.text.clone(),
                     link_target: target.clone(),
-                    error: format!("Target file not found: {}", normalized_path),
+                    error: format!("Placeholder link target: {}", link_path),
                     anchor: anchor.clone(),
+                    context,
                 });
                 continue;
+            }
+
+            // File-level checks only when there is an explicit path component
+            if !link_path.is_empty() {
+                let meta = fs::metadata(&normalized_path).ok();
+                let exists = meta.is_some();
+                let is_dir = meta.as_ref().map(|m| m.is_dir()).unwrap_or(false);
+
+                if exists && is_dir {
+                    // Valid directory reference
+                    record_link_kind(
+                        &mut counts_by_file,
+                        &mut counts_by_kind,
+                        file_path,
+                        &LinkKind::DirectoryReference,
+                    );
+                } else if exists {
+                    // File exists on disk but may not be indexed (e.g., code)
+                    if !file_set.contains(&normalized_path) {
+                        let ext = file_extension(&normalized_path);
+                        let kind = if is_code_extension(&ext) {
+                            LinkKind::CodeReference
+                        } else {
+                            LinkKind::ExternalReference
+                        };
+                        record_link_kind(
+                            &mut counts_by_file,
+                            &mut counts_by_kind,
+                            file_path,
+                            &kind,
+                        );
+                    }
+                } else {
+                    // Missing target file: classify as doc_missing or code_missing
+                    let ext = file_extension(&normalized_path);
+                    let kind = if is_code_extension(&ext) {
+                        LinkKind::CodeMissing
+                    } else {
+                        LinkKind::DocMissing
+                    };
+                    let context =
+                        get_link_context(&mut file_lines_cache, file_path, line_number)?;
+                    record_link_kind(
+                        &mut counts_by_file,
+                        &mut counts_by_kind,
+                        file_path,
+                        &kind,
+                    );
+                    broken_links.push(BrokenLink {
+                        source_file: file_path.clone(),
+                        line_number,
+                        link_text: link.text.clone(),
+                        link_target: target.clone(),
+                        error: format!("Target file not found: {}", normalized_path),
+                        anchor: anchor.clone(),
+                        context,
+                    });
+                    continue;
+                }
             }
 
             // Check anchor if present
@@ -3596,19 +3884,38 @@ fn cmd_check_links(
 
                 if let Some(anchors) = heading_index.get(target_file) {
                     if !anchors.contains(anchor_text as &str) {
+                        let context =
+                            get_link_context(&mut file_lines_cache, file_path, line_number)?;
+                        let kind = LinkKind::AnchorMissing;
+                        record_link_kind(
+                            &mut counts_by_file,
+                            &mut counts_by_kind,
+                            file_path,
+                            &kind,
+                        );
                         broken_links.push(BrokenLink {
                             source_file: file_path.clone(),
-                            line_number: 0,
+                            line_number,
                             link_text: link.text.clone(),
                             link_target: target.clone(),
                             error: format!("Anchor not found: #{}", anchor_text),
                             anchor: Some(anchor_text.clone()),
+                            context,
                         });
                     }
                 } else {
+                    let context =
+                        get_link_context(&mut file_lines_cache, file_path, line_number)?;
+                    let kind = LinkKind::AnchorUnverified;
+                    record_link_kind(
+                        &mut counts_by_file,
+                        &mut counts_by_kind,
+                        file_path,
+                        &kind,
+                    );
                     broken_links.push(BrokenLink {
                         source_file: file_path.clone(),
-                        line_number: 0,
+                        line_number,
                         link_text: link.text.clone(),
                         link_target: target.clone(),
                         error: format!(
@@ -3616,6 +3923,7 @@ fn cmd_check_links(
                             anchor_text
                         ),
                         anchor: Some(anchor_text.clone()),
+                        context,
                     });
                 }
             }
@@ -3624,12 +3932,33 @@ fn cmd_check_links(
 
     let valid_links = total_links - broken_links.len();
 
-    let result = LinkCheckResult {
+    let mut result = LinkCheckResult {
         total_links,
         valid_links,
         broken_links: broken_links.len(),
         broken: broken_links.clone(),
+        summary: None,
     };
+
+    // Build summary if requested (or for human-readable output)
+    if summary_flag || summary_only || !json {
+        let mut by_file_vec: Vec<LinkSummaryByFile> = counts_by_file
+            .into_iter()
+            .map(|(file, counts)| LinkSummaryByFile { file, counts })
+            .collect();
+        by_file_vec.sort_by(|a, b| a.file.cmp(&b.file));
+
+        let mut by_kind_vec: Vec<LinkSummaryByKind> = counts_by_kind
+            .into_iter()
+            .map(|(kind, count)| LinkSummaryByKind { kind, count })
+            .collect();
+        by_kind_vec.sort_by(|a, b| a.kind.cmp(&b.kind));
+
+        result.summary = Some(LinkCheckSummary {
+            by_file: by_file_vec,
+            by_kind: by_kind_vec,
+        });
+    }
 
     if json {
         println!("{}", serde_json::to_string_pretty(&result)?);
@@ -3650,13 +3979,28 @@ fn cmd_check_links(
         );
         println!();
 
-        if !broken_links.is_empty() {
+        // Print summary if available
+        if let Some(summary) = &result.summary {
+            println!("{}", "Summary by kind:".cyan().bold());
+            for item in &summary.by_kind {
+                println!("  - {:<18} {}", item.kind, item.count);
+            }
+            println!();
+        }
+
+        if !summary_only && !broken_links.is_empty() {
             println!("{}", "Broken Links:".red().bold());
             println!();
 
             for (idx, link) in broken_links.iter().enumerate() {
                 println!("[{}] {}", idx + 1, link.source_file.white().bold());
                 println!("    Link: [{}]({})", link.link_text, link.link_target);
+                if link.line_number > 0 {
+                    println!("    Line: {}", link.line_number);
+                }
+                if let Some(ref ctx) = link.context {
+                    println!("    Context: {}", ctx);
+                }
                 println!("    Error: {}", link.error.red());
                 println!();
             }
@@ -3664,6 +4008,95 @@ fn cmd_check_links(
     }
 
     Ok(())
+}
+
+/// Load a single-line context snippet for a link location.
+fn get_link_context(
+    cache: &mut HashMap<String, Vec<String>>,
+    file_path: &str,
+    line_number: usize,
+) -> Result<Option<String>, Box<dyn std::error::Error>> {
+    if line_number == 0 {
+        return Ok(None);
+    }
+
+    // Load and cache file lines if needed
+    if !cache.contains_key(file_path) {
+        let content = fs::read_to_string(file_path)?;
+        let lines: Vec<String> = content.lines().map(|s| s.to_string()).collect();
+        cache.insert(file_path.to_string(), lines);
+    }
+
+    let lines = cache.get(file_path).unwrap();
+    if line_number == 0 || line_number > lines.len() {
+        return Ok(None);
+    }
+
+    let mut line = lines[line_number - 1].clone();
+    if line.len() > 160 {
+        line.truncate(157);
+        line.push_str("...");
+    }
+
+    Ok(Some(line))
+}
+
+fn is_placeholder_target(target: &str) -> bool {
+    let lower = target.to_ascii_lowercase();
+
+    matches!(
+        lower.as_str(),
+        "url" | "text" | "todo" | "link" | "tbd"
+    ) || lower.starts_with("/path/to/")
+        || lower.starts_with("../path/to/")
+        || lower.contains("replace-me")
+}
+
+fn is_code_extension(ext: &str) -> bool {
+    matches!(
+        ext,
+        "py" | "ts" | "tsx" | "json" | "yaml" | "yml" | "png" | "svg"
+    )
+}
+
+fn file_extension(path: &str) -> String {
+    std::path::Path::new(path)
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or_default()
+        .to_lowercase()
+}
+
+fn record_link_kind(
+    by_file: &mut HashMap<String, HashMap<String, usize>>,
+    by_kind: &mut HashMap<String, usize>,
+    file: &str,
+    kind: &LinkKind,
+) {
+    let kind_name = match kind {
+        LinkKind::DocMissing => "doc_missing",
+        LinkKind::CodeMissing => "code_missing",
+        LinkKind::Placeholder => "placeholder",
+        LinkKind::CodeReference => "code_reference",
+        LinkKind::DirectoryReference => "directory_reference",
+        LinkKind::ExternalReference => "external_reference",
+        LinkKind::AnchorMissing => "anchor_missing",
+        LinkKind::AnchorUnverified => "anchor_unverified",
+    }
+    .to_string();
+
+    by_kind
+        .entry(kind_name.clone())
+        .and_modify(|c| *c += 1)
+        .or_insert(1);
+
+    let entry = by_file
+        .entry(file.to_string())
+        .or_insert_with(HashMap::new);
+    entry
+        .entry(kind_name)
+        .and_modify(|c| *c += 1)
+        .or_insert(1);
 }
 
 /// Find all files that link to a specific file
@@ -4511,5 +4944,42 @@ mod tests {
         // Short words should not be stemmed
         assert_eq!(stem_word("go"), "go");
         assert_eq!(stem_word("it"), "it");
+    }
+
+    #[test]
+    fn test_get_link_context_basic() {
+        let path = "test_get_link_context_basic.md";
+        fs::write(
+            path,
+            "first line\nsecond line with a link\nthird line\n",
+        )
+        .unwrap();
+
+        let mut cache: HashMap<String, Vec<String>> = HashMap::new();
+        let ctx = get_link_context(&mut cache, path, 2).unwrap();
+        assert_eq!(ctx.as_deref(), Some("second line with a link"));
+
+        // Out-of-range line number should yield None
+        let ctx_out = get_link_context(&mut cache, path, 10).unwrap();
+        assert!(ctx_out.is_none());
+
+        fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn test_get_link_context_truncates_long_lines() {
+        let path = "test_get_link_context_truncate.md";
+        let long_line = "a".repeat(200);
+        fs::write(path, format!("{long_line}\n")).unwrap();
+
+        let mut cache: HashMap<String, Vec<String>> = HashMap::new();
+        let ctx = get_link_context(&mut cache, path, 1)
+            .unwrap()
+            .expect("expected context");
+
+        assert!(ctx.len() <= 160);
+        assert!(ctx.ends_with("..."));
+
+        fs::remove_file(path).unwrap();
     }
 }
