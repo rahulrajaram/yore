@@ -1,10 +1,10 @@
 use ahash::AHasher;
 use clap::{Parser, Subcommand};
 use colored::Colorize;
+use globset::Glob;
 use ignore::WalkBuilder;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
-use globset::Glob;
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::hash::{Hash, Hasher};
@@ -1142,8 +1142,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             policy,
             stale_days: _,
         } => {
-            let index_path =
-                resolve_index_path(index, cli.profile.as_deref(), &config);
+            let index_path = resolve_index_path(index, cli.profile.as_deref(), &config);
 
             let mut combined = CombinedCheckResult::default();
 
@@ -1183,8 +1182,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                     if let Some(link_result) = &combined.links {
                         if let Some(summary) = &link_result.summary {
                             for key in &fail_on {
-                                if let Some(kind) =
-                                    summary.by_kind.iter().find(|k| &k.kind == key)
+                                if let Some(kind) = summary.by_kind.iter().find(|k| &k.kind == key)
                                 {
                                     if kind.count > 0 {
                                         should_fail = true;
@@ -1211,8 +1209,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                             for v in &policy_result.violations {
                                 let sev = v.severity.as_str();
                                 if (fail_on_error && sev == "error")
-                                    || (fail_on_warn
-                                        && (sev == "warn" || sev == "warning"))
+                                    || (fail_on_warn && (sev == "warn" || sev == "warning"))
                                 {
                                     should_fail = true;
                                     break;
@@ -1237,7 +1234,14 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         } => {
             let (path, output, types, roots) =
                 resolve_build_params(path, output, types, cli.profile.as_deref(), &config);
-            cmd_build(&path, &output, &types, &exclude, cli.quiet, roots.as_deref())
+            cmd_build(
+                &path,
+                &output,
+                &types,
+                &exclude,
+                cli.quiet,
+                roots.as_deref(),
+            )
         }
         Commands::Query {
             terms,
@@ -1298,8 +1302,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             summary,
             summary_only,
         } => {
-            let index_path =
-                resolve_index_path(index, cli.profile.as_deref(), &config);
+            let index_path = resolve_index_path(index, cli.profile.as_deref(), &config);
             cmd_check_links(&index_path, json, root.as_deref(), summary, summary_only)
         }
         Commands::Backlinks { file, index, json } => cmd_backlinks(&file, &index, json),
@@ -1313,9 +1316,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             json,
             threshold,
         } => cmd_canonicality(&index, json, threshold),
-        Commands::ExportGraph { format, index } => {
-            cmd_export_graph(&index, &format)
-        }
+        Commands::ExportGraph { format, index } => cmd_export_graph(&index, &format),
         Commands::SuggestConsolidation {
             threshold,
             json,
@@ -4460,15 +4461,9 @@ fn run_link_check(
 
             // Placeholder targets: treat as lower-severity broken links
             if !link_path.is_empty() && is_placeholder_target(&link_path) {
-                let context =
-                    get_link_context(&mut file_lines_cache, file_path, line_number)?;
+                let context = get_link_context(&mut file_lines_cache, file_path, line_number)?;
                 let kind = LinkKind::Placeholder;
-                record_link_kind(
-                    &mut counts_by_file,
-                    &mut counts_by_kind,
-                    file_path,
-                    &kind,
-                );
+                record_link_kind(&mut counts_by_file, &mut counts_by_kind, file_path, &kind);
                 broken_links.push(BrokenLink {
                     source_file: file_path.clone(),
                     line_number,
@@ -4519,14 +4514,8 @@ fn run_link_check(
                     } else {
                         LinkKind::DocMissing
                     };
-                    let context =
-                        get_link_context(&mut file_lines_cache, file_path, line_number)?;
-                    record_link_kind(
-                        &mut counts_by_file,
-                        &mut counts_by_kind,
-                        file_path,
-                        &kind,
-                    );
+                    let context = get_link_context(&mut file_lines_cache, file_path, line_number)?;
+                    record_link_kind(&mut counts_by_file, &mut counts_by_kind, file_path, &kind);
                     broken_links.push(BrokenLink {
                         source_file: file_path.clone(),
                         line_number,
@@ -4570,15 +4559,9 @@ fn run_link_check(
                         });
                     }
                 } else {
-                    let context =
-                        get_link_context(&mut file_lines_cache, file_path, line_number)?;
+                    let context = get_link_context(&mut file_lines_cache, file_path, line_number)?;
                     let kind = LinkKind::AnchorUnverified;
-                    record_link_kind(
-                        &mut counts_by_file,
-                        &mut counts_by_kind,
-                        file_path,
-                        &kind,
-                    );
+                    record_link_kind(&mut counts_by_file, &mut counts_by_kind, file_path, &kind);
                     broken_links.push(BrokenLink {
                         source_file: file_path.clone(),
                         line_number,
@@ -4651,10 +4634,7 @@ fn cmd_check_links(
         r.to_path_buf()
     } else if let Some((first_path, _)) = forward_index.files.iter().next() {
         let first_path = Path::new(first_path);
-        first_path
-            .parent()
-            .unwrap_or(Path::new("."))
-            .to_path_buf()
+        first_path.parent().unwrap_or(Path::new(".")).to_path_buf()
     } else {
         Path::new(".").to_path_buf()
     };
@@ -4753,16 +4733,11 @@ fn load_policy_config(path: &Path) -> Result<PolicyConfig, Box<dyn std::error::E
 }
 
 fn rule_severity(rule: &PolicyRule) -> String {
-    rule.severity
-        .as_deref()
-        .unwrap_or("error")
-        .to_string()
+    rule.severity.as_deref().unwrap_or("error").to_string()
 }
 
 fn rule_name(rule: &PolicyRule) -> String {
-    rule.name
-        .clone()
-        .unwrap_or_else(|| rule.pattern.clone())
+    rule.name.clone().unwrap_or_else(|| rule.pattern.clone())
 }
 
 fn collect_policy_violations_for_content(
@@ -4911,11 +4886,7 @@ fn cmd_policy(
     json: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     if !config_path.exists() {
-        return Err(format!(
-            "Policy file not found: {}",
-            config_path.display()
-        )
-        .into());
+        return Err(format!("Policy file not found: {}", config_path.display()).into());
     }
 
     let result = run_policy_check(index_dir, config_path)?;
@@ -4969,12 +4940,10 @@ fn suggest_new_link_target(
         return None;
     }
 
-    let link_filename = Path::new(link_path)
-        .file_name()
-        .and_then(|s| s.to_str())?;
+    let link_filename = Path::new(link_path).file_name().and_then(|s| s.to_str())?;
 
     // Find all candidates whose filename matches
-    let mut candidates: Vec<&str> = available_files
+    let candidates: Vec<&str> = available_files
         .iter()
         .map(|s| s.as_str())
         .filter(|p| {
@@ -5085,10 +5054,7 @@ fn cmd_fix_links(
     // Group fixes by file
     let mut fixes_by_file: HashMap<String, Vec<LinkFix>> = HashMap::new();
     for fix in fixes {
-        fixes_by_file
-            .entry(fix.file.clone())
-            .or_default()
-            .push(fix);
+        fixes_by_file.entry(fix.file.clone()).or_default().push(fix);
     }
 
     println!(
@@ -5122,11 +5088,7 @@ fn cmd_fix_links(
     Ok(())
 }
 
-fn apply_reference_mapping_to_content(
-    content: &str,
-    from: &str,
-    to: &str,
-) -> String {
+fn apply_reference_mapping_to_content(content: &str, from: &str, to: &str) -> String {
     let old = format!("]({})", from);
     let new = format!("]({})", to);
     content.replace(&old, &new)
@@ -5150,11 +5112,7 @@ fn cmd_fix_references(
         return Err("Specify either --dry-run or --apply".into());
     }
     if !mapping_path.exists() {
-        return Err(format!(
-            "Mapping file not found: {}",
-            mapping_path.display()
-        )
-        .into());
+        return Err(format!("Mapping file not found: {}", mapping_path.display()).into());
     }
 
     let mappings_cfg = load_reference_mappings(mapping_path)?;
@@ -5284,9 +5242,7 @@ fn cmd_mv(
     Ok(())
 }
 
-fn compute_inbound_link_counts(
-    forward_index: &ForwardIndex,
-) -> HashMap<String, usize> {
+fn compute_inbound_link_counts(forward_index: &ForwardIndex) -> HashMap<String, usize> {
     let mut counts: HashMap<String, usize> = HashMap::new();
 
     for (source_path, entry) in &forward_index.files {
@@ -5327,17 +5283,16 @@ fn compute_inbound_link_counts(
     counts
 }
 
-fn cmd_export_graph(
-    index_dir: &Path,
-    format: &str,
-) -> Result<(), Box<dyn std::error::Error>> {
+fn cmd_export_graph(index_dir: &Path, format: &str) -> Result<(), Box<dyn std::error::Error>> {
     let forward_index = load_forward_index(index_dir)?;
 
     // Map normalized paths to canonical file keys
     let mut norm_to_key: HashMap<String, String> = HashMap::new();
     for path in forward_index.files.keys() {
         let normalized = normalize_path(Path::new(path));
-        norm_to_key.entry(normalized).or_insert_with(|| path.clone());
+        norm_to_key
+            .entry(normalized)
+            .or_insert_with(|| path.clone());
     }
 
     let mut nodes: Vec<GraphNode> = forward_index
@@ -5449,11 +5404,7 @@ fn run_stale_check(
         }
         let meta = meta?;
         let modified = meta.modified().unwrap_or(now);
-        let age = now
-            .duration_since(modified)
-            .unwrap_or_default()
-            .as_secs()
-            / 86_400;
+        let age = now.duration_since(modified).unwrap_or_default().as_secs() / 86_400;
 
         let inlinks = *inbound_counts.get(file_path).unwrap_or(&0);
 
@@ -5507,9 +5458,7 @@ fn cmd_stale(
     for f in &result.files {
         println!(
             "{} ({} days, {} inbound links)",
-            f.file,
-            f.days_since_modified,
-            f.inbound_links
+            f.file, f.days_since_modified, f.inbound_links
         );
     }
 
@@ -5519,10 +5468,8 @@ fn cmd_stale(
 fn is_placeholder_target(target: &str) -> bool {
     let lower = target.to_ascii_lowercase();
 
-    matches!(
-        lower.as_str(),
-        "url" | "text" | "todo" | "link" | "tbd"
-    ) || lower.starts_with("/path/to/")
+    matches!(lower.as_str(), "url" | "text" | "todo" | "link" | "tbd")
+        || lower.starts_with("/path/to/")
         || lower.starts_with("../path/to/")
         || lower.contains("replace-me")
 }
@@ -5565,13 +5512,8 @@ fn record_link_kind(
         .and_modify(|c| *c += 1)
         .or_insert(1);
 
-    let entry = by_file
-        .entry(file.to_string())
-        .or_insert_with(HashMap::new);
-    entry
-        .entry(kind_name)
-        .and_modify(|c| *c += 1)
-        .or_insert(1);
+    let entry = by_file.entry(file.to_string()).or_insert_with(HashMap::new);
+    entry.entry(kind_name).and_modify(|c| *c += 1).or_insert(1);
 }
 
 /// Find all files that link to a specific file
@@ -6461,8 +6403,7 @@ Some content here.
 ## Deprecated
 "#;
 
-        let violations =
-            collect_policy_violations_for_content(&rule, "docs/example.md", content);
+        let violations = collect_policy_violations_for_content(&rule, "docs/example.md", content);
 
         // Should not flag missing Objective (it exists)
         assert!(
@@ -6488,11 +6429,7 @@ Some content here.
         available.insert("docs/guide/other.md".to_string());
 
         // Source and target are in the same parent; filename matches exactly one file
-        let suggested = suggest_new_link_target(
-            "docs/guide/README.md",
-            "auth.md",
-            &available,
-        );
+        let suggested = suggest_new_link_target("docs/guide/README.md", "auth.md", &available);
         // Expect a simple relative path suggestion
         assert_eq!(suggested.as_deref(), Some("auth.md"));
     }
@@ -6500,8 +6437,11 @@ Some content here.
     #[test]
     fn test_apply_reference_mapping_to_content() {
         let content = "See [auth](docs/old/auth.md) for details.";
-        let updated =
-            apply_reference_mapping_to_content(content, "docs/old/auth.md", "docs/architecture/AUTH.md");
+        let updated = apply_reference_mapping_to_content(
+            content,
+            "docs/old/auth.md",
+            "docs/architecture/AUTH.md",
+        );
         assert_eq!(
             updated,
             "See [auth](docs/architecture/AUTH.md) for details."
@@ -6556,11 +6496,7 @@ Some content here.
             idf_map: HashMap::new(),
         };
 
-        let pairs = vec![(
-            "docs/a.md".to_string(),
-            "docs/b.md".to_string(),
-            0.9_f64,
-        )];
+        let pairs = vec![("docs/a.md".to_string(), "docs/b.md".to_string(), 0.9_f64)];
 
         let result = build_consolidation_groups(&forward_index, &pairs);
         assert_eq!(result.total_groups, 1);
@@ -6735,11 +6671,7 @@ Some content here.
     #[test]
     fn test_get_link_context_basic() {
         let path = "test_get_link_context_basic.md";
-        fs::write(
-            path,
-            "first line\nsecond line with a link\nthird line\n",
-        )
-        .unwrap();
+        fs::write(path, "first line\nsecond line with a link\nthird line\n").unwrap();
 
         let mut cache: HashMap<String, Vec<String>> = HashMap::new();
         let ctx = get_link_context(&mut cache, path, 2).unwrap();
