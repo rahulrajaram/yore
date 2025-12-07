@@ -526,6 +526,31 @@ enum Commands {
         apply: bool,
     },
 
+    /// Rewrite references according to an explicit mapping file.
+    ///
+    /// This promotes the `mv --update-refs` machinery into a more general
+    /// bulk rewrite tool, suitable for large documentation reorganizations.
+    ///
+    /// Example:
+    ///   yore fix-references --mapping mappings.yaml --index .yore --dry-run
+    FixReferences {
+        /// Path to reference mapping configuration (YAML)
+        #[arg(short, long)]
+        mapping: PathBuf,
+
+        /// Index directory
+        #[arg(short, long, default_value = ".yore")]
+        index: PathBuf,
+
+        /// Show planned changes without modifying files
+        #[arg(long)]
+        dry_run: bool,
+
+        /// Apply changes to files on disk
+        #[arg(long)]
+        apply: bool,
+    },
+
     /// Move a documentation file and optionally update inbound references.
     ///
     /// This is a thin, ergonomic wrapper around link rewrite logic. When
@@ -578,6 +603,45 @@ enum Commands {
         /// Output as JSON
         #[arg(long)]
         json: bool,
+    },
+
+    /// Export the documentation link graph.
+    ///
+    /// Emits either a JSON representation or a Graphviz DOT file
+    /// describing links between indexed documents.
+    ///
+    /// Example:
+    ///   yore export-graph --format json --index .yore
+    ///   yore export-graph --format dot --index .yore > graph.dot
+    ExportGraph {
+        /// Output format: "json" or "dot"
+        #[arg(long, default_value = "json")]
+        format: String,
+
+        /// Index directory
+        #[arg(short, long, default_value = ".yore")]
+        index: PathBuf,
+    },
+
+    /// Suggest document consolidation based on duplicates and canonicality.
+    ///
+    /// Uses duplicate detection and canonicality scoring to propose a
+    /// canonical document and a set of files that should be merged into it.
+    ///
+    /// Example:
+    ///   yore suggest-consolidation --threshold 0.7 --json --index .yore
+    SuggestConsolidation {
+        /// Minimum duplicate similarity threshold (0.0 to 1.0)
+        #[arg(long, default_value = "0.7")]
+        threshold: f64,
+
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+
+        /// Index directory
+        #[arg(short, long, default_value = ".yore")]
+        index: PathBuf,
     },
 
     /// Check documentation against declarative policy rules.
@@ -677,7 +741,7 @@ struct LinkCheckResult {
 }
 
 // Policy / taxonomy structures
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Default)]
 struct PolicyRule {
     /// Glob pattern to match files (e.g., "agents/plans/*.md")
     pattern: String,
@@ -693,6 +757,18 @@ struct PolicyRule {
     /// Optional severity ("error" or "warn"), defaults to "error"
     #[serde(default)]
     severity: Option<String>,
+    /// Optional minimum document length in lines
+    #[serde(default)]
+    min_length: Option<usize>,
+    /// Optional maximum document length in lines
+    #[serde(default)]
+    max_length: Option<usize>,
+    /// Required markdown headings (by text, without leading '#')
+    #[serde(default)]
+    required_headings: Vec<String>,
+    /// Forbidden markdown headings (by text, without leading '#')
+    #[serde(default)]
+    forbidden_headings: Vec<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -741,6 +817,40 @@ struct StaleResult {
     files: Vec<StaleFile>,
 }
 
+#[derive(Serialize, Debug)]
+struct GraphNode {
+    id: String,
+}
+
+#[derive(Serialize, Debug)]
+struct GraphEdge {
+    source: String,
+    target: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    anchor: Option<String>,
+}
+
+#[derive(Serialize, Debug)]
+struct GraphExport {
+    nodes: Vec<GraphNode>,
+    edges: Vec<GraphEdge>,
+}
+
+#[derive(Serialize, Debug)]
+struct ConsolidationGroup {
+    canonical: String,
+    merge_into: Vec<String>,
+    canonical_score: f64,
+    avg_similarity: f64,
+    note: String,
+}
+
+#[derive(Serialize, Debug)]
+struct ConsolidationResult {
+    total_groups: usize,
+    groups: Vec<ConsolidationGroup>,
+}
+
 #[derive(Debug, Clone)]
 struct LinkFix {
     file: String,
@@ -755,6 +865,18 @@ struct Backlink {
     link_text: String,
     link_target: String,
     anchor: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ReferenceMapping {
+    from: String,
+    to: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct ReferenceMappingConfig {
+    #[serde(default)]
+    mappings: Vec<ReferenceMapping>,
 }
 
 #[derive(Serialize, Debug)]
@@ -1052,25 +1174,56 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             let json_str = serde_json::to_string_pretty(&combined)?;
             println!("{}", json_str);
 
-            // CI/fail-on logic still applies only to link kinds.
-            if ci && links && !fail_on.is_empty() {
-                if let Some(link_result) = &combined.links {
-                    if let Some(summary) = &link_result.summary {
-                        let mut should_fail = false;
-                        for key in &fail_on {
-                            if let Some(kind) =
-                                summary.by_kind.iter().find(|k| &k.kind == key)
-                            {
-                                if kind.count > 0 {
+            // CI/fail-on logic: allow both link kinds and policy severities.
+            if ci && !fail_on.is_empty() {
+                let mut should_fail = false;
+
+                // Link-based failure conditions (existing behavior)
+                if links {
+                    if let Some(link_result) = &combined.links {
+                        if let Some(summary) = &link_result.summary {
+                            for key in &fail_on {
+                                if let Some(kind) =
+                                    summary.by_kind.iter().find(|k| &k.kind == key)
+                                {
+                                    if kind.count > 0 {
+                                        should_fail = true;
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // Policy-based failure conditions: keyed by severity.
+                // Supported keys:
+                //   - "policy_error"  – fail if any violation has severity "error"
+                //   - "policy_warn"   – fail if any violation has severity "warn" / "warning"
+                if taxonomy {
+                    if let Some(policy_result) = &combined.policy {
+                        let fail_on_error = fail_on.iter().any(|k| k == "policy_error");
+                        let fail_on_warn = fail_on
+                            .iter()
+                            .any(|k| k == "policy_warn" || k == "policy_warning");
+
+                        if fail_on_error || fail_on_warn {
+                            for v in &policy_result.violations {
+                                let sev = v.severity.as_str();
+                                if (fail_on_error && sev == "error")
+                                    || (fail_on_warn
+                                        && (sev == "warn" || sev == "warning"))
+                                {
                                     should_fail = true;
                                     break;
                                 }
                             }
                         }
-                        if should_fail {
-                            std::process::exit(1);
-                        }
                     }
+                }
+
+                if should_fail {
+                    std::process::exit(1);
                 }
             }
 
@@ -1160,6 +1313,14 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             json,
             threshold,
         } => cmd_canonicality(&index, json, threshold),
+        Commands::ExportGraph { format, index } => {
+            cmd_export_graph(&index, &format)
+        }
+        Commands::SuggestConsolidation {
+            threshold,
+            json,
+            index,
+        } => cmd_suggest_consolidation(&index, threshold, json),
         Commands::Policy {
             config,
             index,
@@ -1170,6 +1331,12 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             dry_run,
             apply,
         } => cmd_fix_links(&index, dry_run, apply),
+        Commands::FixReferences {
+            mapping,
+            index,
+            dry_run,
+            apply,
+        } => cmd_fix_references(&index, &mapping, dry_run, apply),
         Commands::Mv {
             from,
             to,
@@ -2091,6 +2258,198 @@ fn cmd_dupes(
     }
 
     Ok(())
+}
+
+fn compute_duplicate_pairs(
+    forward_index: &ForwardIndex,
+    threshold: f64,
+) -> Vec<(String, String, f64)> {
+    // Build LSH buckets for duplicate detection
+    let buckets = lsh_buckets(&forward_index.files, 16); // 16 bands x 8 rows = 128 hashes
+    let mut candidates: HashSet<(String, String)> = HashSet::new();
+
+    // Collect candidate pairs from buckets
+    for paths in buckets.values() {
+        if paths.len() > 1 {
+            for i in 0..paths.len() {
+                for j in (i + 1)..paths.len() {
+                    let (p1, p2) = if paths[i] < paths[j] {
+                        (paths[i].clone(), paths[j].clone())
+                    } else {
+                        (paths[j].clone(), paths[i].clone())
+                    };
+                    candidates.insert((p1, p2));
+                }
+            }
+        }
+    }
+
+    let mut pairs: Vec<(String, String, f64)> = Vec::new(); // (path1, path2, combined)
+
+    for (path1, path2) in &candidates {
+        if let (Some(entry1), Some(entry2)) = (
+            forward_index.files.get(path1),
+            forward_index.files.get(path2),
+        ) {
+            let kw1: HashSet<String> = entry1
+                .keywords
+                .iter()
+                .chain(entry1.body_keywords.iter())
+                .map(|k| k.to_lowercase())
+                .collect();
+            let kw2: HashSet<String> = entry2
+                .keywords
+                .iter()
+                .chain(entry2.body_keywords.iter())
+                .map(|k| k.to_lowercase())
+                .collect();
+
+            let jaccard = jaccard_similarity(&kw1, &kw2);
+            let simhash_sim = simhash_similarity(entry1.simhash, entry2.simhash);
+            let minhash_sim = minhash_similarity(&entry1.minhash, &entry2.minhash);
+            let combined = jaccard * 0.4 + simhash_sim * 0.3 + minhash_sim * 0.3;
+
+            if combined >= threshold {
+                pairs.push((path1.clone(), path2.clone(), combined));
+            }
+        }
+    }
+
+    // Sort descending by similarity for stable output
+    pairs.sort_by(|a, b| b.2.partial_cmp(&a.2).unwrap_or(std::cmp::Ordering::Equal));
+    pairs
+}
+
+fn build_consolidation_groups(
+    forward_index: &ForwardIndex,
+    pairs: &[(String, String, f64)],
+) -> ConsolidationResult {
+    use std::cmp::Ordering;
+
+    // Build adjacency graph
+    let mut adj: HashMap<String, HashSet<String>> = HashMap::new();
+    let mut pair_sims: HashMap<(String, String), f64> = HashMap::new();
+
+    for (a, b, sim) in pairs {
+        adj.entry(a.clone()).or_default().insert(b.clone());
+        adj.entry(b.clone()).or_default().insert(a.clone());
+
+        let key = if a <= b {
+            (a.clone(), b.clone())
+        } else {
+            (b.clone(), a.clone())
+        };
+        pair_sims.insert(key, *sim);
+    }
+
+    let mut visited: HashSet<String> = HashSet::new();
+    let mut groups: Vec<ConsolidationGroup> = Vec::new();
+
+    for start in adj.keys() {
+        if visited.contains(start) {
+            continue;
+        }
+
+        // BFS/DFS to collect connected component
+        let mut stack = vec![start.clone()];
+        let mut component: Vec<String> = Vec::new();
+
+        while let Some(node) = stack.pop() {
+            if !visited.insert(node.clone()) {
+                continue;
+            }
+            component.push(node.clone());
+            if let Some(neighbors) = adj.get(&node) {
+                for n in neighbors {
+                    if !visited.contains(n) {
+                        stack.push(n.clone());
+                    }
+                }
+            }
+        }
+
+        if component.len() < 2 {
+            continue;
+        }
+
+        // Choose canonical doc via canonicality score
+        component.sort(); // deterministic order
+        let mut best: Option<(String, f64)> = None;
+        for path in &component {
+            if let Some(entry) = forward_index.files.get(path) {
+                let (score, _reasons) = score_canonicality_with_reasons(path, entry);
+                match best {
+                    None => best = Some((path.clone(), score)),
+                    Some((_, best_score)) => {
+                        if score > best_score
+                            || (score == best_score
+                                && path.cmp(&best.as_ref().unwrap().0) == Ordering::Less)
+                        {
+                            best = Some((path.clone(), score));
+                        }
+                    }
+                }
+            }
+        }
+
+        let (canonical, canonical_score) = match best {
+            Some(v) => v,
+            None => continue,
+        };
+
+        let mut merge_into: Vec<String> = component
+            .iter()
+            .filter(|p| *p != &canonical)
+            .cloned()
+            .collect();
+        if merge_into.is_empty() {
+            continue;
+        }
+
+        merge_into.sort();
+
+        // Compute average similarity between canonical and others
+        let mut total_sim = 0.0;
+        let mut count = 0usize;
+        for other in &merge_into {
+            let key = if &canonical <= other {
+                (canonical.clone(), other.clone())
+            } else {
+                (other.clone(), canonical.clone())
+            };
+            if let Some(sim) = pair_sims.get(&key) {
+                total_sim += *sim;
+                count += 1;
+            }
+        }
+        let avg_similarity = if count > 0 {
+            total_sim / (count as f64)
+        } else {
+            0.0
+        };
+
+        let note = format!(
+            "Merge {} file(s) into canonical {}",
+            merge_into.len(),
+            canonical
+        );
+
+        groups.push(ConsolidationGroup {
+            canonical,
+            merge_into,
+            canonical_score,
+            avg_similarity,
+            note,
+        });
+    }
+
+    // Stable ordering: sort by canonical path
+    groups.sort_by(|a, b| a.canonical.cmp(&b.canonical));
+
+    ConsolidationResult {
+        total_groups: groups.len(),
+        groups,
+    }
 }
 
 /// NEW: Show what's shared between two files
@@ -4406,6 +4765,114 @@ fn rule_name(rule: &PolicyRule) -> String {
         .unwrap_or_else(|| rule.pattern.clone())
 }
 
+fn collect_policy_violations_for_content(
+    rule: &PolicyRule,
+    file_path: &str,
+    content: &str,
+) -> Vec<PolicyViolation> {
+    let mut violations = Vec::new();
+
+    // Required substrings
+    for needle in &rule.must_contain {
+        if !content.contains(needle) {
+            violations.push(PolicyViolation {
+                file: file_path.to_string(),
+                rule: rule_name(rule),
+                message: format!("Missing required content: {:?}", needle),
+                severity: rule_severity(rule),
+                kind: "policy_violation".to_string(),
+            });
+        }
+    }
+
+    // Forbidden substrings
+    for needle in &rule.must_not_contain {
+        if content.contains(needle) {
+            violations.push(PolicyViolation {
+                file: file_path.to_string(),
+                rule: rule_name(rule),
+                message: format!("Forbidden content present: {:?}", needle),
+                severity: rule_severity(rule),
+                kind: "policy_violation".to_string(),
+            });
+        }
+    }
+
+    // Length-based checks (line count)
+    let line_count = content.lines().count();
+    if let Some(min_len) = rule.min_length {
+        if line_count < min_len {
+            violations.push(PolicyViolation {
+                file: file_path.to_string(),
+                rule: rule_name(rule),
+                message: format!(
+                    "Document too short: {} lines (min required: {})",
+                    line_count, min_len
+                ),
+                severity: rule_severity(rule),
+                kind: "policy_violation".to_string(),
+            });
+        }
+    }
+    if let Some(max_len) = rule.max_length {
+        if line_count > max_len {
+            violations.push(PolicyViolation {
+                file: file_path.to_string(),
+                rule: rule_name(rule),
+                message: format!(
+                    "Document too long: {} lines (max allowed: {})",
+                    line_count, max_len
+                ),
+                severity: rule_severity(rule),
+                kind: "policy_violation".to_string(),
+            });
+        }
+    }
+
+    // Heading-based checks
+    if !rule.required_headings.is_empty() || !rule.forbidden_headings.is_empty() {
+        let heading_re = Regex::new(r"^(#{1,6})\s+(.+)$").unwrap();
+        let mut headings: Vec<String> = Vec::new();
+
+        for line in content.lines() {
+            if let Some(caps) = heading_re.captures(line) {
+                if let Some(text_match) = caps.get(2) {
+                    let text = text_match.as_str().trim().to_string();
+                    headings.push(text);
+                }
+            }
+        }
+
+        // Required headings (by text)
+        for h in &rule.required_headings {
+            if !headings.iter().any(|t| t == h) {
+                violations.push(PolicyViolation {
+                    file: file_path.to_string(),
+                    rule: rule_name(rule),
+                    message: format!("Missing required heading: {:?}", h),
+                    severity: rule_severity(rule),
+                    kind: "policy_violation".to_string(),
+                });
+            }
+        }
+
+        // Forbidden headings (by text)
+        for h in &rule.forbidden_headings {
+            if headings.iter().any(|t| t == h) {
+                violations.push(PolicyViolation {
+                    file: file_path.to_string(),
+                    rule: rule_name(rule),
+                    message: format!("Forbidden heading present: {:?}", h),
+                    severity: rule_severity(rule),
+                    kind: "policy_violation".to_string(),
+                });
+            }
+        }
+    }
+
+    violations
+}
+
 fn run_policy_check(
     index_dir: &Path,
     policy_path: &Path,
@@ -4425,32 +4892,9 @@ fn run_policy_check(
             }
 
             let content = fs::read_to_string(file_path)?;
-
-            // Required substrings
-            for needle in &rule.must_contain {
-                if !content.contains(needle) {
-                    violations.push(PolicyViolation {
-                        file: file_path.clone(),
-                        rule: rule_name(rule),
-                        message: format!("Missing required content: {:?}", needle),
-                        severity: rule_severity(rule),
-                        kind: "policy_violation".to_string(),
-                    });
-                }
-            }
-
-            // Forbidden substrings
-            for needle in &rule.must_not_contain {
-                if content.contains(needle) {
-                    violations.push(PolicyViolation {
-                        file: file_path.clone(),
-                        rule: rule_name(rule),
-                        message: format!("Forbidden content present: {:?}", needle),
-                        severity: rule_severity(rule),
-                        kind: "policy_violation".to_string(),
-                    });
-                }
-            }
+            let mut rule_violations =
+                collect_policy_violations_for_content(rule, file_path, &content);
+            violations.append(&mut rule_violations);
         }
     }
 
@@ -4688,6 +5132,84 @@ fn apply_reference_mapping_to_content(
     content.replace(&old, &new)
 }
 
+fn load_reference_mappings(
+    path: &Path,
+) -> Result<ReferenceMappingConfig, Box<dyn std::error::Error>> {
+    let content = fs::read_to_string(path)?;
+    let cfg: ReferenceMappingConfig = serde_yaml::from_str(&content)?;
+    Ok(cfg)
+}
+
+fn cmd_fix_references(
+    index_dir: &Path,
+    mapping_path: &Path,
+    dry_run: bool,
+    apply: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    if !dry_run && !apply {
+        return Err("Specify either --dry-run or --apply".into());
+    }
+    if !mapping_path.exists() {
+        return Err(format!(
+            "Mapping file not found: {}",
+            mapping_path.display()
+        )
+        .into());
+    }
+
+    let mappings_cfg = load_reference_mappings(mapping_path)?;
+    if mappings_cfg.mappings.is_empty() {
+        println!(
+            "{} No mappings defined in {}",
+            "Note:".yellow(),
+            mapping_path.display()
+        );
+        return Ok(());
+    }
+
+    let forward_index = load_forward_index(index_dir)?;
+
+    let mut changed_files: Vec<String> = Vec::new();
+
+    for (file_path, _entry) in &forward_index.files {
+        let content = fs::read_to_string(file_path)?;
+        let mut new_content = content.clone();
+
+        for m in &mappings_cfg.mappings {
+            new_content = apply_reference_mapping_to_content(&new_content, &m.from, &m.to);
+        }
+
+        if new_content != content {
+            if dry_run {
+                changed_files.push(file_path.clone());
+            } else if apply {
+                fs::write(file_path, new_content)?;
+                changed_files.push(file_path.clone());
+            }
+        }
+    }
+
+    if changed_files.is_empty() {
+        println!(
+            "{} No references needed updating based on {}",
+            "Note:".yellow(),
+            mapping_path.display()
+        );
+    } else {
+        println!(
+            "{} Updated references in {} file(s) using mapping {}",
+            if dry_run { "Would update" } else { "Updated" },
+            changed_files.len(),
+            mapping_path.display()
+        );
+        for f in changed_files {
+            println!("  {}", f);
+        }
+    }
+
+    Ok(())
+}
+
 fn cmd_mv(
     from: &Path,
     to: &Path,
@@ -4803,6 +5325,110 @@ fn compute_inbound_link_counts(
     }
 
     counts
+}
+
+fn cmd_export_graph(
+    index_dir: &Path,
+    format: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let forward_index = load_forward_index(index_dir)?;
+
+    // Map normalized paths to canonical file keys
+    let mut norm_to_key: HashMap<String, String> = HashMap::new();
+    for path in forward_index.files.keys() {
+        let normalized = normalize_path(Path::new(path));
+        norm_to_key.entry(normalized).or_insert_with(|| path.clone());
+    }
+
+    let mut nodes: Vec<GraphNode> = forward_index
+        .files
+        .keys()
+        .cloned()
+        .map(|id| GraphNode { id })
+        .collect();
+    nodes.sort_by(|a, b| a.id.cmp(&b.id));
+
+    let mut edges: Vec<GraphEdge> = Vec::new();
+
+    for (source_path, entry) in &forward_index.files {
+        let source_base = Path::new(source_path);
+
+        for link in &entry.links {
+            let target = &link.target;
+
+            // Skip external links
+            if target.starts_with("http://")
+                || target.starts_with("https://")
+                || target.starts_with("mailto:")
+                || target.starts_with("ftp://")
+            {
+                continue;
+            }
+
+            // Split off anchor
+            let (link_path, anchor) = if let Some(idx) = target.find('#') {
+                (
+                    target[..idx].to_string(),
+                    Some(target[idx + 1..].to_string()),
+                )
+            } else {
+                (target.clone(), None)
+            };
+
+            if link_path.is_empty() {
+                continue;
+            }
+
+            let resolved = if let Some(parent) = source_base.parent() {
+                parent.join(&link_path).to_string_lossy().to_string()
+            } else {
+                link_path.clone()
+            };
+            let normalized = normalize_path(Path::new(&resolved));
+
+            if let Some(target_key) = norm_to_key.get(&normalized) {
+                edges.push(GraphEdge {
+                    source: source_path.clone(),
+                    target: target_key.clone(),
+                    anchor,
+                });
+            }
+        }
+    }
+
+    if edges.is_empty() {
+        println!(
+            "{} No internal documentation links found to export.",
+            "Info:".yellow()
+        );
+        return Ok(());
+    }
+
+    match format {
+        "json" => {
+            let export = GraphExport { nodes, edges };
+            println!("{}", serde_json::to_string_pretty(&export)?);
+        }
+        "dot" => {
+            println!("digraph yore_docs {{");
+            for edge in &edges {
+                let src = edge.source.replace('"', "\\\"");
+                let dst = edge.target.replace('"', "\\\"");
+                if let Some(anchor) = &edge.anchor {
+                    let label = anchor.replace('"', "\\\"");
+                    println!("  \"{}\" -> \"{}\" [label=\"{}\"];", src, dst, label);
+                } else {
+                    println!("  \"{}\" -> \"{}\";", src, dst);
+                }
+            }
+            println!("}}");
+        }
+        other => {
+            return Err(format!("Unsupported format: {}", other).into());
+        }
+    }
+
+    Ok(())
 }
 
 fn run_stale_check(
@@ -5394,6 +6020,63 @@ fn cmd_canonicality(
     Ok(())
 }
 
+fn cmd_suggest_consolidation(
+    index_dir: &Path,
+    threshold: f64,
+    json: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let forward_index = load_forward_index(index_dir)?;
+
+    let pairs = compute_duplicate_pairs(&forward_index, threshold);
+    if pairs.is_empty() {
+        println!(
+            "{} No consolidation candidates found above threshold {}.",
+            "Info:".yellow(),
+            threshold
+        );
+        return Ok(());
+    }
+
+    let result = build_consolidation_groups(&forward_index, &pairs);
+
+    if json {
+        println!("{}", serde_json::to_string_pretty(&result)?);
+        return Ok(());
+    }
+
+    if result.groups.is_empty() {
+        println!(
+            "{} Duplicate pairs found but no multi-file groups to consolidate.",
+            "Info:".yellow()
+        );
+        return Ok(());
+    }
+
+    println!("{}", "Consolidation Suggestions".cyan().bold());
+    println!("{}", "=".repeat(60));
+    println!(
+        "Total groups: {} (threshold: {:.2})",
+        result.total_groups, threshold
+    );
+    println!();
+
+    for group in &result.groups {
+        println!("{}", group.canonical.white().bold());
+        println!(
+            "  Canonical score: {:.2}, Avg similarity: {:.2}",
+            group.canonical_score, group.avg_similarity
+        );
+        println!("  Merge into canonical:");
+        for m in &group.merge_into {
+            println!("    - {}", m);
+        }
+        println!("  Note: {}", group.note);
+        println!();
+    }
+
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -5697,6 +6380,7 @@ mod tests {
             must_not_contain: vec![],
             name: Some("plans-must-have-objective".to_string()),
             severity: Some("error".to_string()),
+            ..Default::default()
         };
 
         let policy = PolicyConfig { rules: vec![rule] };
@@ -5708,21 +6392,10 @@ mod tests {
         assert!(!matcher.is_match("docs/architecture/auth.md"));
 
         // Simulate a violation: empty content should trigger missing "## Objective"
-        let mut violations = Vec::new();
         let rule_ref = &policy.rules[0];
-        let file_path = "agents/plans/plan.md".to_string();
+        let file_path = "agents/plans/plan.md";
         let content = String::new();
-        for needle in &rule_ref.must_contain {
-            if !content.contains(needle) {
-                violations.push(PolicyViolation {
-                    file: file_path.clone(),
-                    rule: rule_name(rule_ref),
-                    message: format!("Missing required content: {:?}", needle),
-                    severity: rule_severity(rule_ref),
-                    kind: "policy_violation".to_string(),
-                });
-            }
-        }
+        let violations = collect_policy_violations_for_content(rule_ref, file_path, &content);
 
         assert_eq!(violations.len(), 1);
         let v = &violations[0];
@@ -5730,6 +6403,82 @@ mod tests {
         assert_eq!(v.rule, "plans-must-have-objective");
         assert_eq!(v.severity, "error");
         assert_eq!(v.kind, "policy_violation");
+    }
+
+    #[test]
+    fn test_policy_min_max_length_violations() {
+        // Require 10–20 lines
+        let rule = PolicyRule {
+            pattern: "docs/*.md".to_string(),
+            min_length: Some(10),
+            max_length: Some(20),
+            name: Some("length-bounds".to_string()),
+            severity: Some("error".to_string()),
+            ..Default::default()
+        };
+
+        // Too short: 3 lines
+        let short_content = "line1\nline2\nline3\n";
+        let short_violations =
+            collect_policy_violations_for_content(&rule, "docs/short.md", short_content);
+        assert!(
+            short_violations
+                .iter()
+                .any(|v| v.message.contains("Document too short")),
+            "Expected a 'Document too short' violation"
+        );
+
+        // Too long: 25 lines
+        let long_content: String = (0..25).map(|i| format!("line{}\n", i)).collect();
+        let long_violations =
+            collect_policy_violations_for_content(&rule, "docs/long.md", &long_content);
+        assert!(
+            long_violations
+                .iter()
+                .any(|v| v.message.contains("Document too long")),
+            "Expected a 'Document too long' violation"
+        );
+    }
+
+    #[test]
+    fn test_policy_required_and_forbidden_headings() {
+        let rule = PolicyRule {
+            pattern: "docs/*.md".to_string(),
+            required_headings: vec!["Objective".to_string()],
+            forbidden_headings: vec!["Deprecated".to_string()],
+            name: Some("heading-rules".to_string()),
+            severity: Some("error".to_string()),
+            ..Default::default()
+        };
+
+        let content = r#"
+# Title
+
+## Objective
+
+Some content here.
+
+## Deprecated
+"#;
+
+        let violations =
+            collect_policy_violations_for_content(&rule, "docs/example.md", content);
+
+        // Should not flag missing Objective (it exists)
+        assert!(
+            !violations
+                .iter()
+                .any(|v| v.message.contains("Missing required heading")),
+            "Did not expect a missing required heading violation"
+        );
+
+        // Should flag forbidden Deprecated heading
+        assert!(
+            violations
+                .iter()
+                .any(|v| v.message.contains("Forbidden heading present")),
+            "Expected a forbidden heading violation"
+        );
     }
 
     #[test]
@@ -5757,6 +6506,67 @@ mod tests {
             updated,
             "See [auth](docs/architecture/AUTH.md) for details."
         );
+    }
+
+    #[test]
+    fn test_build_consolidation_groups_basic() {
+        // Minimal forward index with two files; we create a single duplicate pair
+        let mut files = HashMap::new();
+
+        files.insert(
+            "docs/a.md".to_string(),
+            FileEntry {
+                path: "docs/a.md".to_string(),
+                size_bytes: 0,
+                line_count: 1,
+                headings: vec![],
+                keywords: vec!["foo".to_string()],
+                body_keywords: vec![],
+                links: vec![],
+                simhash: 0,
+                term_frequencies: HashMap::new(),
+                doc_length: 0,
+                minhash: vec![],
+                section_fingerprints: vec![],
+            },
+        );
+        files.insert(
+            "docs/b.md".to_string(),
+            FileEntry {
+                path: "docs/b.md".to_string(),
+                size_bytes: 0,
+                line_count: 1,
+                headings: vec![],
+                keywords: vec!["foo".to_string()],
+                body_keywords: vec![],
+                links: vec![],
+                simhash: 0,
+                term_frequencies: HashMap::new(),
+                doc_length: 0,
+                minhash: vec![],
+                section_fingerprints: vec![],
+            },
+        );
+
+        let forward_index = ForwardIndex {
+            files,
+            indexed_at: chrono_now(),
+            version: 3,
+            avg_doc_length: 0.0,
+            idf_map: HashMap::new(),
+        };
+
+        let pairs = vec![(
+            "docs/a.md".to_string(),
+            "docs/b.md".to_string(),
+            0.9_f64,
+        )];
+
+        let result = build_consolidation_groups(&forward_index, &pairs);
+        assert_eq!(result.total_groups, 1);
+        let group = &result.groups[0];
+        assert!(group.canonical == "docs/a.md" || group.canonical == "docs/b.md");
+        assert_eq!(group.merge_into.len(), 1);
     }
 
     #[test]

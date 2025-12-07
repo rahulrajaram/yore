@@ -379,7 +379,7 @@ yore eval --questions questions.jsonl --index docs/.index
 Runs one or more documentation checks in a single entrypoint.
 
 ```bash
-yore check [--links] [--taxonomy --policy <file>] --index <index-dir>
+yore check [--links] [--taxonomy --policy <file>] --index <index-dir> [--ci --fail-on <kinds>]
 ```
 
 **Key options**
@@ -387,6 +387,8 @@ yore check [--links] [--taxonomy --policy <file>] --index <index-dir>
 * `--links` – Run link validation (same engine as `check-links`)
 * `--taxonomy` – Run policy checks using a YAML policy file
 * `--policy` – Path to policy config (default: `.yore-policy.yaml`)
+* `--ci` – Enable CI‑style exit codes
+* `--fail-on` – Comma‑separated list of kinds/severities that should cause a non‑zero exit code (for example `doc_missing,code_missing,policy_error`)
 
 **Examples**
 
@@ -396,6 +398,11 @@ yore check --links --index docs/.index
 
 # Links + policy checks in one run
 yore check --links --taxonomy --policy .yore-policy.yaml --index docs/.index
+
+# CI mode: fail when there are missing docs or policy errors
+yore check --links --taxonomy --policy .yore-policy.yaml \
+  --index docs/.index \
+  --ci --fail-on doc_missing,policy_error
 ```
 
 ---
@@ -476,7 +483,39 @@ yore mv docs/old/auth.md docs/architecture/AUTH.md --index docs/.index --update-
 
 ---
 
-### 7.11 `yore backlinks`
+### 7.11 `yore fix-references`
+
+Rewrites references according to an explicit mapping file, useful for bulk reorganizations.
+
+```bash
+yore fix-references --mapping <file> --index <index-dir> [--dry-run|--apply]
+```
+
+The mapping file is a small YAML document:
+
+```yaml
+mappings:
+  - from: docs/old/auth.md
+    to: docs/architecture/AUTH.md
+  - from: docs/old/payments.md
+    to: docs/architecture/PAYMENTS.md
+```
+
+Each mapping is applied across all indexed files by rewriting `]({from})` to `]({to})`.
+
+**Examples**
+
+```bash
+# Preview bulk reference changes only
+yore fix-references --mapping mappings.yaml --index docs/.index --dry-run
+
+# Apply bulk reference changes
+yore fix-references --mapping mappings.yaml --index docs/.index --apply
+```
+
+---
+
+### 7.12 `yore backlinks`
 
 Lists all documents that link to a specified file.
 
@@ -498,7 +537,7 @@ yore backlinks docs/architecture/DEPLOYMENT-GUIDE.md --index docs/.index
 
 ---
 
-### 7.12 `yore stale`
+### 7.13 `yore stale`
 
 Reports potentially stale documentation based on modification time and inbound links.
 
@@ -520,7 +559,7 @@ yore stale --index docs/.index --days 90 --min-inlinks 0 --json
 
 ---
 
-### 7.13 `yore orphans`
+### 7.14 `yore orphans`
 
 Finds documents with no inbound links (potential cleanup candidates or undocumented islands).
 
@@ -542,7 +581,7 @@ yore orphans --index docs/.index --exclude README --exclude INDEX
 
 ---
 
-### 7.14 `yore canonicality`
+### 7.15 `yore canonicality`
 
 Reports canonicality scores for documents based on path, naming, and other trust signals.
 
@@ -568,6 +607,44 @@ yore canonicality --index <index-dir>
 ```bash
 # Show only high‑authority documents
 yore canonicality --index docs/.index --threshold 0.7
+```
+
+---
+
+### 7.16 `yore export-graph`
+
+Exports the documentation link graph as JSON or Graphviz DOT.
+
+```bash
+yore export-graph --index <index-dir> --format <json|dot>
+```
+
+**Examples**
+
+```bash
+# JSON graph for downstream tooling
+yore export-graph --index docs/.index --format json > graph.json
+
+# DOT graph for visualization
+yore export-graph --index docs/.index --format dot > graph.dot
+```
+
+---
+
+### 7.17 `yore suggest-consolidation`
+
+Suggests consolidation candidates based on duplicate detection and canonicality scoring.
+
+```bash
+yore suggest-consolidation --index <index-dir> --threshold <0.0–1.0> [--json]
+```
+
+Each suggestion identifies a canonical document and a set of files that are strong duplication candidates to merge into it.
+
+**Example**
+
+```bash
+yore suggest-consolidation --index docs/.index --threshold 0.7 --json
 ```
 
 ---
