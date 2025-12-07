@@ -17,6 +17,8 @@ regex = "1"
 colored = "2"
 toml = "0.8"
 ahash = "0.8"  # Fast hashing for MinHash
+serde_yaml = "0.9"
+globset = "0.4"
 
 [profile.release]
 lto = true

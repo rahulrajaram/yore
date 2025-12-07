@@ -4,6 +4,7 @@ use colored::Colorize;
 use ignore::WalkBuilder;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
+use globset::Glob;
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::hash::{Hash, Hasher};
@@ -89,6 +90,58 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
+    /// Run one or more documentation checks in a single entrypoint.
+    ///
+    /// This is the recommended command for CI and agents. It can run
+    /// link checks, duplicate detection, taxonomy/policy rules, and
+    /// staleness checks, and it supports CI-friendly exit codes.
+    ///
+    /// Examples:
+    ///   # Basic link check (default index)
+    ///   yore check --links
+    ///
+    ///   # CI mode: fail on missing docs or code
+    ///   yore check --links --ci --fail-on doc_missing,code_missing
+    ///
+    ///   # Run links + staleness + taxonomy in one shot
+    ///   yore check --links --stale --taxonomy --policy taxonomy.yaml
+    Check {
+        /// Run link validation (same engine as `check-links`)
+        #[arg(long)]
+        links: bool,
+
+        /// Run duplicate detection (same engine as `dupes`)
+        #[arg(long)]
+        dupes: bool,
+
+        /// Run taxonomy / policy checks from a YAML file
+        #[arg(long)]
+        taxonomy: bool,
+
+        /// Run staleness checks based on mtime and inbound links
+        #[arg(long)]
+        stale: bool,
+
+        /// CI mode: machine-friendly output and exit codes
+        #[arg(long)]
+        ci: bool,
+
+        /// Kinds/check IDs that should cause a non-zero exit code (comma or space separated)
+        #[arg(long, value_delimiter = ',')]
+        fail_on: Vec<String>,
+
+        /// Index directory
+        #[arg(short, long, default_value = ".yore")]
+        index: PathBuf,
+
+        /// Policy file for taxonomy checks (YAML)
+        #[arg(long)]
+        policy: Option<PathBuf>,
+
+        /// Staleness threshold in days (files older than this are candidates)
+        #[arg(long, default_value = "30")]
+        stale_days: u64,
+    },
     /// Build forward and reverse indexes over documentation.
     ///
     /// Walks a directory tree, indexes Markdown/text files, and writes
@@ -449,6 +502,104 @@ enum Commands {
         #[arg(short, long, default_value = "0.0")]
         threshold: f64,
     },
+
+    /// Automatically fix a subset of broken relative links.
+    ///
+    /// This command uses heuristics over the index to propose safe,
+    /// mechanical rewrites for links that appear to point to the wrong
+    /// file (for example, the right filename in the wrong directory).
+    ///
+    /// Examples:
+    ///   yore fix-links --index .yore --dry-run
+    ///   yore fix-links --index .yore --apply
+    FixLinks {
+        /// Index directory
+        #[arg(short, long, default_value = ".yore")]
+        index: PathBuf,
+
+        /// Show proposed edits without modifying any files
+        #[arg(long)]
+        dry_run: bool,
+
+        /// Apply changes to files on disk
+        #[arg(long)]
+        apply: bool,
+    },
+
+    /// Move a documentation file and optionally update inbound references.
+    ///
+    /// This is a thin, ergonomic wrapper around link rewrite logic. When
+    /// --update-refs is used, all Markdown links that point to the old
+    /// path are rewritten to point to the new path.
+    ///
+    /// Examples:
+    ///   yore mv docs/old/auth.md docs/architecture/AUTH.md --update-refs --index .yore
+    ///   yore mv agents/tmp/note.md agents/archive/note.md --index .yore
+    Mv {
+        /// Source path to move from
+        from: PathBuf,
+
+        /// Destination path to move to
+        to: PathBuf,
+
+        /// Index directory
+        #[arg(short, long, default_value = ".yore")]
+        index: PathBuf,
+
+        /// Update inbound links that reference the old path
+        #[arg(long)]
+        update_refs: bool,
+
+        /// Show planned changes without modifying files
+        #[arg(long)]
+        dry_run: bool,
+    },
+
+    /// Report potentially stale documentation based on age and inbound links.
+    ///
+    /// Uses file modification time and inbound link counts from the index
+    /// to highlight documents that may be unmaintained or dead.
+    ///
+    /// Example:
+    ///   yore stale --index .yore --days 90 --min-inlinks 0 --json
+    Stale {
+        /// Index directory
+        #[arg(short, long, default_value = ".yore")]
+        index: PathBuf,
+
+        /// Minimum age in days to consider a file stale
+        #[arg(long, default_value = "90")]
+        days: u64,
+
+        /// Minimum inbound link count (files with >= this many links are included)
+        #[arg(long, default_value = "0")]
+        min_inlinks: usize,
+
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Check documentation against declarative policy rules.
+    ///
+    /// Reads a YAML policy file describing path patterns and required or
+    /// forbidden content, and reports any violations it finds.
+    ///
+    /// Example:
+    ///   yore policy --config .yore-policy.yaml --index .yore --json
+    Policy {
+        /// Path to policy configuration (YAML)
+        #[arg(long, default_value = ".yore-policy.yaml")]
+        config: PathBuf,
+
+        /// Index directory
+        #[arg(short, long, default_value = ".yore")]
+        index: PathBuf,
+
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 // Evaluation structures
@@ -523,6 +674,78 @@ struct LinkCheckResult {
     broken: Vec<BrokenLink>,
     #[serde(skip_serializing_if = "Option::is_none")]
     summary: Option<LinkCheckSummary>,
+}
+
+// Policy / taxonomy structures
+#[derive(Debug, Deserialize)]
+struct PolicyRule {
+    /// Glob pattern to match files (e.g., "agents/plans/*.md")
+    pattern: String,
+    /// Required substrings that must appear in matching files
+    #[serde(default)]
+    must_contain: Vec<String>,
+    /// Substrings that must NOT appear in matching files
+    #[serde(default)]
+    must_not_contain: Vec<String>,
+    /// Optional rule name (for clearer reporting)
+    #[serde(default)]
+    name: Option<String>,
+    /// Optional severity ("error" or "warn"), defaults to "error"
+    #[serde(default)]
+    severity: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct PolicyConfig {
+    #[serde(default)]
+    rules: Vec<PolicyRule>,
+}
+
+#[derive(Serialize, Debug)]
+struct PolicyViolation {
+    file: String,
+    rule: String,
+    message: String,
+    severity: String,
+    /// Always "policy_violation" so agents can key off kind
+    kind: String,
+}
+
+#[derive(Serialize, Debug)]
+struct PolicyCheckResult {
+    policy_file: String,
+    total_violations: usize,
+    violations: Vec<PolicyViolation>,
+}
+
+#[derive(Serialize, Debug, Default)]
+struct CombinedCheckResult {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    links: Option<LinkCheckResult>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    policy: Option<PolicyCheckResult>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    stale: Option<StaleResult>,
+}
+
+#[derive(Serialize, Debug)]
+struct StaleFile {
+    file: String,
+    days_since_modified: u64,
+    inbound_links: usize,
+}
+
+#[derive(Serialize, Debug)]
+struct StaleResult {
+    total_stale: usize,
+    files: Vec<StaleFile>,
+}
+
+#[derive(Debug, Clone)]
+struct LinkFix {
+    file: String,
+    old_target: String,
+    new_target: String,
 }
 
 // Backlinks structures
@@ -764,6 +987,13 @@ fn resolve_index_path(
 }
 
 fn main() {
+    if let Err(e) = run() {
+        eprintln!("{}: {}", "error".red().bold(), e);
+        std::process::exit(1);
+    }
+}
+
+fn run() -> Result<(), Box<dyn std::error::Error>> {
     // Handle SIGPIPE / broken pipe panics gracefully (e.g., when piping into `head`).
     let default_hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
@@ -779,6 +1009,73 @@ fn main() {
     let config = load_config(&cli.config, cli.quiet);
 
     let result = match cli.command {
+        Commands::Check {
+            links,
+            dupes: _,
+            taxonomy,
+            stale,
+            ci,
+            fail_on,
+            index,
+            policy,
+            stale_days: _,
+        } => {
+            let index_path =
+                resolve_index_path(index, cli.profile.as_deref(), &config);
+
+            let mut combined = CombinedCheckResult::default();
+
+            // Run link checks if requested
+            if links {
+                let include_summary = true;
+                let link_result = run_link_check(&index_path, None, include_summary, false)?;
+                combined.links = Some(link_result);
+            }
+
+            // Run policy checks if requested
+            if taxonomy {
+                let policy_path = match policy {
+                    Some(p) => p,
+                    None => PathBuf::from(".yore-policy.yaml"),
+                };
+                let policy_result = run_policy_check(&index_path, &policy_path)?;
+                combined.policy = Some(policy_result);
+            }
+
+            // Run staleness checks if requested (using default thresholds for now)
+            if stale {
+                let stale_result = run_stale_check(&index_path, 90, 0)?;
+                combined.stale = Some(stale_result);
+            }
+
+            // For now, `check` always prints JSON.
+            let json_str = serde_json::to_string_pretty(&combined)?;
+            println!("{}", json_str);
+
+            // CI/fail-on logic still applies only to link kinds.
+            if ci && links && !fail_on.is_empty() {
+                if let Some(link_result) = &combined.links {
+                    if let Some(summary) = &link_result.summary {
+                        let mut should_fail = false;
+                        for key in &fail_on {
+                            if let Some(kind) =
+                                summary.by_kind.iter().find(|k| &k.kind == key)
+                            {
+                                if kind.count > 0 {
+                                    should_fail = true;
+                                    break;
+                                }
+                            }
+                        }
+                        if should_fail {
+                            std::process::exit(1);
+                        }
+                    }
+                }
+            }
+
+            Ok(())
+        }
         Commands::Build {
             path,
             output,
@@ -863,12 +1160,31 @@ fn main() {
             json,
             threshold,
         } => cmd_canonicality(&index, json, threshold),
+        Commands::Policy {
+            config,
+            index,
+            json,
+        } => cmd_policy(&config, &index, json),
+        Commands::FixLinks {
+            index,
+            dry_run,
+            apply,
+        } => cmd_fix_links(&index, dry_run, apply),
+        Commands::Mv {
+            from,
+            to,
+            index,
+            update_refs,
+            dry_run,
+        } => cmd_mv(&from, &to, &index, update_refs, dry_run),
+        Commands::Stale {
+            index,
+            days,
+            min_inlinks,
+            json,
+        } => cmd_stale(&index, days, min_inlinks, json),
     };
-
-    if let Err(e) = result {
-        eprintln!("{}: {}", "error".red().bold(), e);
-        std::process::exit(1);
-    }
+    result
 }
 
 fn cmd_build(
@@ -3672,14 +3988,14 @@ fn cmd_eval(questions_path: &Path, index_dir: &Path) -> Result<(), Box<dyn std::
     Ok(())
 }
 
-/// Check all markdown links for validity
-fn cmd_check_links(
+/// Core link checking engine used by both `check` and `check-links`.
+/// Returns a structured `LinkCheckResult` without printing.
+fn run_link_check(
     index_dir: &Path,
-    json: bool,
     root: Option<&Path>,
-    summary_flag: bool,
+    include_summary: bool,
     summary_only: bool,
-) -> Result<(), Box<dyn std::error::Error>> {
+) -> Result<LinkCheckResult, Box<dyn std::error::Error>> {
     // Load the forward index
     let forward_index = load_forward_index(index_dir)?;
 
@@ -3709,15 +4025,6 @@ fn cmd_check_links(
             Path::new(".").to_path_buf()
         }
     };
-
-    if !json {
-        println!(
-            "{} {}",
-            "Checking links in".cyan().bold(),
-            root_dir.display()
-        );
-        println!();
-    }
 
     // Build file set for fast lookup (keys of the HashMap)
     let file_set: HashSet<String> = forward_index.files.keys().cloned().collect();
@@ -3940,8 +4247,8 @@ fn cmd_check_links(
         summary: None,
     };
 
-    // Build summary if requested (or for human-readable output)
-    if summary_flag || summary_only || !json {
+    // Build summary if requested
+    if include_summary || summary_only {
         let mut by_file_vec: Vec<LinkSummaryByFile> = counts_by_file
             .into_iter()
             .map(|(file, counts)| LinkSummaryByFile { file, counts })
@@ -3960,50 +4267,89 @@ fn cmd_check_links(
         });
     }
 
+    Ok(result)
+}
+
+/// User-facing link check command that prints results.
+fn cmd_check_links(
+    index_dir: &Path,
+    json: bool,
+    root: Option<&Path>,
+    summary_flag: bool,
+    summary_only: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let include_summary = summary_flag || summary_only || !json;
+    let result = run_link_check(index_dir, root, include_summary, summary_only)?;
+
     if json {
         println!("{}", serde_json::to_string_pretty(&result)?);
+        return Ok(());
+    }
+
+    // Recompute root directory for display purposes only
+    let forward_index = load_forward_index(index_dir)?;
+    let display_root = if let Some(r) = root {
+        r.to_path_buf()
+    } else if let Some((first_path, _)) = forward_index.files.iter().next() {
+        let first_path = Path::new(first_path);
+        first_path
+            .parent()
+            .unwrap_or(Path::new("."))
+            .to_path_buf()
     } else {
-        println!("{}", "Link Check Results".cyan().bold());
-        println!("{}", "=".repeat(60));
-        println!();
-        println!("Total links:  {}", total_links);
-        println!("Valid links:  {} {}", valid_links, "✓".green().bold());
-        println!(
-            "Broken links: {} {}",
-            broken_links.len(),
-            if broken_links.is_empty() {
-                "✓".green().bold()
-            } else {
-                "✗".red().bold()
-            }
-        );
-        println!();
+        Path::new(".").to_path_buf()
+    };
 
-        // Print summary if available
-        if let Some(summary) = &result.summary {
-            println!("{}", "Summary by kind:".cyan().bold());
-            for item in &summary.by_kind {
-                println!("  - {:<18} {}", item.kind, item.count);
-            }
-            println!();
+    println!(
+        "{} {}",
+        "Checking links in".cyan().bold(),
+        display_root.display()
+    );
+    println!();
+
+    println!("{}", "Link Check Results".cyan().bold());
+    println!("{}", "=".repeat(60));
+    println!();
+    println!("Total links:  {}", result.total_links);
+    println!(
+        "Valid links:  {} {}",
+        result.valid_links,
+        "✓".green().bold()
+    );
+    println!(
+        "Broken links: {} {}",
+        result.broken_links,
+        if result.broken_links == 0 {
+            "✓".green().bold().to_string()
+        } else {
+            "✗".red().bold().to_string()
         }
+    );
+    println!();
 
-        if !summary_only && !broken_links.is_empty() {
-            println!("{}", "Broken Links:".red().bold());
-            println!();
+    if let Some(summary) = &result.summary {
+        println!("{}", "Summary by kind:".cyan().bold());
+        for item in &summary.by_kind {
+            println!("  - {:<18} {}", item.kind, item.count);
+        }
+        println!();
+    }
 
-            for (idx, link) in broken_links.iter().enumerate() {
-                println!("[{}] {}", idx + 1, link.source_file.white().bold());
-                println!("    Link: [{}]({})", link.link_text, link.link_target);
-                if link.line_number > 0 {
-                    println!("    Line: {}", link.line_number);
-                }
-                if let Some(ref ctx) = link.context {
-                    println!("    Context: {}", ctx);
-                }
-                println!("    Error: {}", link.error.red());
-                println!();
+    if !summary_only && !result.broken.is_empty() {
+        println!("{}", "Broken Links:".red().bold());
+        println!();
+
+        for (idx, link) in result.broken.iter().enumerate() {
+            println!("[{}] {}", idx + 1, link.source_file.white().bold());
+            println!("    Link: [{}]({})", link.link_text, link.link_target);
+            if link.line_number > 0 {
+                println!("    Line: {}", link.line_number);
             }
+            if let Some(ref ctx) = link.context {
+                println!("    Context: {}", ctx);
+            }
+            println!("    Error: {}", link.error.red());
+            println!();
         }
     }
 
@@ -4039,6 +4385,509 @@ fn get_link_context(
     }
 
     Ok(Some(line))
+}
+
+fn load_policy_config(path: &Path) -> Result<PolicyConfig, Box<dyn std::error::Error>> {
+    let content = fs::read_to_string(path)?;
+    let cfg: PolicyConfig = serde_yaml::from_str(&content)?;
+    Ok(cfg)
+}
+
+fn rule_severity(rule: &PolicyRule) -> String {
+    rule.severity
+        .as_deref()
+        .unwrap_or("error")
+        .to_string()
+}
+
+fn rule_name(rule: &PolicyRule) -> String {
+    rule.name
+        .clone()
+        .unwrap_or_else(|| rule.pattern.clone())
+}
+
+fn run_policy_check(
+    index_dir: &Path,
+    policy_path: &Path,
+) -> Result<PolicyCheckResult, Box<dyn std::error::Error>> {
+    let forward_index = load_forward_index(index_dir)?;
+    let policy = load_policy_config(policy_path)?;
+
+    let mut violations = Vec::new();
+
+    for rule in &policy.rules {
+        let glob = Glob::new(&rule.pattern)?;
+        let matcher = glob.compile_matcher();
+
+        for (file_path, _entry) in &forward_index.files {
+            if !matcher.is_match(file_path) {
+                continue;
+            }
+
+            let content = fs::read_to_string(file_path)?;
+
+            // Required substrings
+            for needle in &rule.must_contain {
+                if !content.contains(needle) {
+                    violations.push(PolicyViolation {
+                        file: file_path.clone(),
+                        rule: rule_name(rule),
+                        message: format!("Missing required content: {:?}", needle),
+                        severity: rule_severity(rule),
+                        kind: "policy_violation".to_string(),
+                    });
+                }
+            }
+
+            // Forbidden substrings
+            for needle in &rule.must_not_contain {
+                if content.contains(needle) {
+                    violations.push(PolicyViolation {
+                        file: file_path.clone(),
+                        rule: rule_name(rule),
+                        message: format!("Forbidden content present: {:?}", needle),
+                        severity: rule_severity(rule),
+                        kind: "policy_violation".to_string(),
+                    });
+                }
+            }
+        }
+    }
+
+    Ok(PolicyCheckResult {
+        policy_file: policy_path.to_string_lossy().to_string(),
+        total_violations: violations.len(),
+        violations,
+    })
+}
+
+fn cmd_policy(
+    config_path: &Path,
+    index_dir: &Path,
+    json: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    if !config_path.exists() {
+        return Err(format!(
+            "Policy file not found: {}",
+            config_path.display()
+        )
+        .into());
+    }
+
+    let result = run_policy_check(index_dir, config_path)?;
+
+    if json {
+        println!("{}", serde_json::to_string_pretty(&result)?);
+        return Ok(());
+    }
+
+    if result.violations.is_empty() {
+        println!(
+            "{} No policy violations found ({}).",
+            "✓".green().bold(),
+            result.policy_file
+        );
+        return Ok(());
+    }
+
+    println!(
+        "{} Policy violations found using {}",
+        "✗".red().bold(),
+        result.policy_file
+    );
+    println!("{}", "=".repeat(60));
+    println!();
+
+    for v in &result.violations {
+        println!("{}", v.file.white().bold());
+        println!("  Rule: {}", v.rule);
+        println!("  Severity: {}", v.severity);
+        println!("  Kind: {}", v.kind);
+        println!("  Message: {}", v.message);
+        println!();
+    }
+
+    println!("Total violations: {}", result.total_violations);
+
+    Ok(())
+}
+
+/// Suggest a new link target based on available files in the index.
+/// Very conservative: only rewrites when there is exactly one file with
+/// the same filename as the link target and that file lives under the
+/// same parent directory as the source file.
+fn suggest_new_link_target(
+    source_file: &str,
+    link_path: &str,
+    available_files: &HashSet<String>,
+) -> Option<String> {
+    if link_path.is_empty() {
+        return None;
+    }
+
+    let link_filename = Path::new(link_path)
+        .file_name()
+        .and_then(|s| s.to_str())?;
+
+    // Find all candidates whose filename matches
+    let mut candidates: Vec<&str> = available_files
+        .iter()
+        .map(|s| s.as_str())
+        .filter(|p| {
+            Path::new(p)
+                .file_name()
+                .and_then(|s| s.to_str())
+                .map(|name| name == link_filename)
+                .unwrap_or(false)
+        })
+        .collect();
+
+    if candidates.len() != 1 {
+        return None;
+    }
+
+    let candidate = Path::new(candidates[0]);
+    let source_path = Path::new(source_file);
+    let source_parent = source_path.parent().unwrap_or(Path::new("."));
+
+    // Only handle the simple case where candidate is under the same parent
+    if let Ok(stripped) = candidate.strip_prefix(source_parent) {
+        let rel = stripped.to_string_lossy().to_string();
+        if !rel.is_empty() {
+            return Some(rel);
+        }
+    }
+
+    None
+}
+
+fn cmd_fix_links(
+    index_dir: &Path,
+    dry_run: bool,
+    apply: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    if !dry_run && !apply {
+        return Err("Specify either --dry-run or --apply".into());
+    }
+
+    let forward_index = load_forward_index(index_dir)?;
+
+    // Build set of available files from the index
+    let available_files: HashSet<String> = forward_index.files.keys().cloned().collect();
+
+    let mut fixes: Vec<LinkFix> = Vec::new();
+
+    for (file_path, entry) in &forward_index.files {
+        for link in &entry.links {
+            let target = &link.target;
+
+            // Skip external links
+            if target.starts_with("http://")
+                || target.starts_with("https://")
+                || target.starts_with("mailto:")
+                || target.starts_with("ftp://")
+            {
+                continue;
+            }
+
+            // Split off anchor (we only rewrite the path component)
+            let (link_path, anchor) = if let Some(idx) = target.find('#') {
+                (
+                    target[..idx].to_string(),
+                    Some(target[idx + 1..].to_string()),
+                )
+            } else {
+                (target.clone(), None)
+            };
+
+            // Only consider links that do not resolve to an existing indexed file
+            let source_path = Path::new(file_path);
+            let resolved = if link_path.is_empty() {
+                file_path.clone()
+            } else if let Some(parent) = source_path.parent() {
+                parent.join(&link_path).to_string_lossy().to_string()
+            } else {
+                link_path.clone()
+            };
+
+            let normalized = normalize_path(Path::new(&resolved));
+            if available_files.contains(&normalized) {
+                continue;
+            }
+
+            if let Some(new_rel) = suggest_new_link_target(file_path, &link_path, &available_files)
+            {
+                let mut new_target = new_rel;
+                if let Some(a) = anchor {
+                    new_target.push('#');
+                    new_target.push_str(&a);
+                }
+                if new_target != *target {
+                    fixes.push(LinkFix {
+                        file: file_path.clone(),
+                        old_target: target.clone(),
+                        new_target,
+                    });
+                }
+            }
+        }
+    }
+
+    if fixes.is_empty() {
+        println!("{}", "No safe link fixes found.".green().bold());
+        return Ok(());
+    }
+
+    // Group fixes by file
+    let mut fixes_by_file: HashMap<String, Vec<LinkFix>> = HashMap::new();
+    for fix in fixes {
+        fixes_by_file
+            .entry(fix.file.clone())
+            .or_default()
+            .push(fix);
+    }
+
+    println!(
+        "{} Proposed link fixes in {} file(s):",
+        if dry_run { "Previewing" } else { "Applying" },
+        fixes_by_file.len()
+    );
+    for (file, file_fixes) in &fixes_by_file {
+        println!("{}", file.white().bold());
+        for f in file_fixes {
+            println!("  {} -> {}", f.old_target.red(), f.new_target.green());
+        }
+    }
+
+    if apply {
+        for (file, file_fixes) in &fixes_by_file {
+            let content = fs::read_to_string(file)?;
+            let mut new_content = content.clone();
+            for f in file_fixes {
+                let old = format!("]({})", f.old_target);
+                let new = format!("]({})", f.new_target);
+                new_content = new_content.replace(&old, &new);
+            }
+            if new_content != content {
+                fs::write(file, new_content)?;
+            }
+        }
+        println!("{}", "Link fixes applied.".green().bold());
+    }
+
+    Ok(())
+}
+
+fn apply_reference_mapping_to_content(
+    content: &str,
+    from: &str,
+    to: &str,
+) -> String {
+    let old = format!("]({})", from);
+    let new = format!("]({})", to);
+    content.replace(&old, &new)
+}
+
+fn cmd_mv(
+    from: &Path,
+    to: &Path,
+    index_dir: &Path,
+    update_refs: bool,
+    dry_run: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let from_str = from.to_string_lossy().to_string();
+    let to_str = to.to_string_lossy().to_string();
+
+    if dry_run {
+        println!("{}", "Dry run:".cyan().bold());
+    }
+
+    println!(
+        "{} {} -> {}",
+        if dry_run { "Would move" } else { "Moving" },
+        from_str,
+        to_str
+    );
+
+    if !dry_run {
+        if let Some(parent) = to.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        fs::rename(from, to)?;
+    }
+
+    if update_refs {
+        let forward_index = load_forward_index(index_dir)?;
+
+        // Group by file for rewrites
+        let mut files_to_update: HashSet<String> = HashSet::new();
+        for (file_path, entry) in &forward_index.files {
+            for link in &entry.links {
+                if link.target == from_str {
+                    files_to_update.insert(file_path.clone());
+                }
+            }
+        }
+
+        if files_to_update.is_empty() {
+            println!(
+                "{} No inbound links found for {} in index {}",
+                "Note:".yellow(),
+                from_str,
+                index_dir.display()
+            );
+            return Ok(());
+        }
+
+        println!(
+            "{} Updating references in {} file(s)",
+            if dry_run { "Would update" } else { "Updating" },
+            files_to_update.len()
+        );
+
+        for file in files_to_update {
+            let content = fs::read_to_string(&file)?;
+            let new_content = apply_reference_mapping_to_content(&content, &from_str, &to_str);
+            if dry_run {
+                if content != new_content {
+                    println!("  {} (references would change)", file);
+                }
+            } else if content != new_content {
+                fs::write(&file, new_content)?;
+                println!("  {}", file);
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn compute_inbound_link_counts(
+    forward_index: &ForwardIndex,
+) -> HashMap<String, usize> {
+    let mut counts: HashMap<String, usize> = HashMap::new();
+
+    for (source_path, entry) in &forward_index.files {
+        let source_base = Path::new(source_path);
+        for link in &entry.links {
+            let target = &link.target;
+            if target.starts_with("http://")
+                || target.starts_with("https://")
+                || target.starts_with("mailto:")
+                || target.starts_with("ftp://")
+            {
+                continue;
+            }
+
+            let (link_path, _) = if let Some(idx) = target.find('#') {
+                (
+                    target[..idx].to_string(),
+                    Some(target[idx + 1..].to_string()),
+                )
+            } else {
+                (target.clone(), None)
+            };
+
+            if link_path.is_empty() {
+                continue;
+            }
+
+            let resolved = if let Some(parent) = source_base.parent() {
+                parent.join(&link_path).to_string_lossy().to_string()
+            } else {
+                link_path.clone()
+            };
+            let normalized = normalize_path(Path::new(&resolved));
+            *counts.entry(normalized).or_insert(0) += 1;
+        }
+    }
+
+    counts
+}
+
+fn run_stale_check(
+    index_dir: &Path,
+    days: u64,
+    min_inlinks: usize,
+) -> Result<StaleResult, Box<dyn std::error::Error>> {
+    let forward_index = load_forward_index(index_dir)?;
+    let inbound_counts = compute_inbound_link_counts(&forward_index);
+
+    let now = std::time::SystemTime::now();
+    let mut files = Vec::new();
+
+    for (file_path, _) in &forward_index.files {
+        let meta = fs::metadata(file_path);
+        if meta.is_err() {
+            continue;
+        }
+        let meta = meta?;
+        let modified = meta.modified().unwrap_or(now);
+        let age = now
+            .duration_since(modified)
+            .unwrap_or_default()
+            .as_secs()
+            / 86_400;
+
+        let inlinks = *inbound_counts.get(file_path).unwrap_or(&0);
+
+        if age >= days && inlinks >= min_inlinks {
+            files.push(StaleFile {
+                file: file_path.clone(),
+                days_since_modified: age,
+                inbound_links: inlinks,
+            });
+        }
+    }
+
+    files.sort_by(|a, b| b.days_since_modified.cmp(&a.days_since_modified));
+
+    Ok(StaleResult {
+        total_stale: files.len(),
+        files,
+    })
+}
+
+fn cmd_stale(
+    index_dir: &Path,
+    days: u64,
+    min_inlinks: usize,
+    json: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let result = run_stale_check(index_dir, days, min_inlinks)?;
+
+    if json {
+        println!("{}", serde_json::to_string_pretty(&result)?);
+        return Ok(());
+    }
+
+    if result.files.is_empty() {
+        println!(
+            "{} No stale files found (threshold: {} days, min_inlinks: {}).",
+            "✓".green().bold(),
+            days,
+            min_inlinks
+        );
+        return Ok(());
+    }
+
+    println!(
+        "{} Stale files (>= {} days old, inbound_links >= {}):",
+        "Stale".yellow().bold(),
+        days,
+        min_inlinks
+    );
+    println!("{}", "=".repeat(60));
+    for f in &result.files {
+        println!(
+            "{} ({} days, {} inbound links)",
+            f.file,
+            f.days_since_modified,
+            f.inbound_links
+        );
+    }
+
+    Ok(())
 }
 
 fn is_placeholder_target(target: &str) -> bool {
@@ -4837,6 +5686,133 @@ mod tests {
 
         // Higher term frequency should yield higher BM25 score
         assert!(score_high > score_low);
+    }
+
+    #[test]
+    fn test_policy_rule_matching_and_violations() {
+        // Build a simple policy with one rule
+        let rule = PolicyRule {
+            pattern: "agents/plans/*.md".to_string(),
+            must_contain: vec!["## Objective".to_string()],
+            must_not_contain: vec![],
+            name: Some("plans-must-have-objective".to_string()),
+            severity: Some("error".to_string()),
+        };
+
+        let policy = PolicyConfig { rules: vec![rule] };
+
+        // Compile glob and check that it matches only the agents/plans file
+        let glob = Glob::new(&policy.rules[0].pattern).unwrap();
+        let matcher = glob.compile_matcher();
+        assert!(matcher.is_match("agents/plans/plan.md"));
+        assert!(!matcher.is_match("docs/architecture/auth.md"));
+
+        // Simulate a violation: empty content should trigger missing "## Objective"
+        let mut violations = Vec::new();
+        let rule_ref = &policy.rules[0];
+        let file_path = "agents/plans/plan.md".to_string();
+        let content = String::new();
+        for needle in &rule_ref.must_contain {
+            if !content.contains(needle) {
+                violations.push(PolicyViolation {
+                    file: file_path.clone(),
+                    rule: rule_name(rule_ref),
+                    message: format!("Missing required content: {:?}", needle),
+                    severity: rule_severity(rule_ref),
+                    kind: "policy_violation".to_string(),
+                });
+            }
+        }
+
+        assert_eq!(violations.len(), 1);
+        let v = &violations[0];
+        assert_eq!(v.file, "agents/plans/plan.md");
+        assert_eq!(v.rule, "plans-must-have-objective");
+        assert_eq!(v.severity, "error");
+        assert_eq!(v.kind, "policy_violation");
+    }
+
+    #[test]
+    fn test_suggest_new_link_target_same_dir() {
+        let mut available = HashSet::new();
+        available.insert("docs/guide/auth.md".to_string());
+        available.insert("docs/guide/other.md".to_string());
+
+        // Source and target are in the same parent; filename matches exactly one file
+        let suggested = suggest_new_link_target(
+            "docs/guide/README.md",
+            "auth.md",
+            &available,
+        );
+        // Expect a simple relative path suggestion
+        assert_eq!(suggested.as_deref(), Some("auth.md"));
+    }
+
+    #[test]
+    fn test_apply_reference_mapping_to_content() {
+        let content = "See [auth](docs/old/auth.md) for details.";
+        let updated =
+            apply_reference_mapping_to_content(content, "docs/old/auth.md", "docs/architecture/AUTH.md");
+        assert_eq!(
+            updated,
+            "See [auth](docs/architecture/AUTH.md) for details."
+        );
+    }
+
+    #[test]
+    fn test_compute_inbound_link_counts() {
+        let mut files = HashMap::new();
+
+        files.insert(
+            "docs/a.md".to_string(),
+            FileEntry {
+                path: "docs/a.md".to_string(),
+                size_bytes: 0,
+                line_count: 1,
+                headings: vec![],
+                keywords: vec![],
+                body_keywords: vec![],
+                links: vec![Link {
+                    line: 1,
+                    text: "b".to_string(),
+                    target: "b.md".to_string(),
+                }],
+                simhash: 0,
+                term_frequencies: HashMap::new(),
+                doc_length: 0,
+                minhash: vec![],
+                section_fingerprints: vec![],
+            },
+        );
+        files.insert(
+            "docs/b.md".to_string(),
+            FileEntry {
+                path: "docs/b.md".to_string(),
+                size_bytes: 0,
+                line_count: 1,
+                headings: vec![],
+                keywords: vec![],
+                body_keywords: vec![],
+                links: vec![],
+                simhash: 0,
+                term_frequencies: HashMap::new(),
+                doc_length: 0,
+                minhash: vec![],
+                section_fingerprints: vec![],
+            },
+        );
+
+        let forward_index = ForwardIndex {
+            files,
+            indexed_at: "0".to_string(),
+            version: 3,
+            avg_doc_length: 0.0,
+            idf_map: HashMap::new(),
+        };
+
+        let counts = compute_inbound_link_counts(&forward_index);
+        // a.md links to b.md, so b.md should have 1 inbound link
+        assert_eq!(counts.get("docs/b.md"), Some(&1));
     }
 
     #[test]

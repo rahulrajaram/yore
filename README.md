@@ -196,13 +196,16 @@ Validate links and inspect the documentation structure:
 
 ```bash
 # Find broken links and anchors
-yore check-links --index docs/.index --json
+yore check --links --index docs/.index
 
 # Show who links to a specific document
 yore backlinks docs/architecture/DEPLOYMENT-GUIDE.md --index docs/.index
 
 # Find documents with no inbound links
 yore orphans --index docs/.index --exclude README
+
+# Find stale documentation (90+ days, no inbound links)
+yore stale --index docs/.index --days 90 --min-inlinks 0 --json
 
 # Show canonical documents by authority score
 yore canonicality --index docs/.index --threshold 0.7
@@ -371,7 +374,33 @@ yore eval --questions questions.jsonl --index docs/.index
 
 ---
 
-### 7.7 `yore check-links`
+### 7.7 `yore check`
+
+Runs one or more documentation checks in a single entrypoint.
+
+```bash
+yore check [--links] [--taxonomy --policy <file>] --index <index-dir>
+```
+
+**Key options**
+
+* `--links` – Run link validation (same engine as `check-links`)
+* `--taxonomy` – Run policy checks using a YAML policy file
+* `--policy` – Path to policy config (default: `.yore-policy.yaml`)
+
+**Examples**
+
+```bash
+# Links only
+yore check --links --index docs/.index
+
+# Links + policy checks in one run
+yore check --links --taxonomy --policy .yore-policy.yaml --index docs/.index
+```
+
+---
+
+### 7.8 `yore check-links`
 
 Validates all Markdown links and anchors in the indexed documents.
 
@@ -395,7 +424,59 @@ yore check-links --index docs/.index --json
 
 ---
 
-### 7.8 `yore backlinks`
+### 7.9 `yore fix-links`
+
+Automatically fixes a conservative subset of broken relative links.
+
+```bash
+yore fix-links --index <index-dir> [--dry-run|--apply]
+```
+
+**Key options**
+
+* `--dry-run` – Show proposed edits without modifying files
+* `--apply` – Apply changes to files on disk
+
+The command looks for links whose targets do not correspond to any indexed file but whose filename matches exactly one indexed document under the same directory tree. It then rewrites those link targets to point to the matching file.
+
+**Examples**
+
+```bash
+# Preview safe link fixes
+yore fix-links --index docs/.index --dry-run
+
+# Apply safe link fixes
+yore fix-links --index docs/.index --apply
+```
+
+---
+
+### 7.10 `yore mv`
+
+Moves a documentation file and optionally updates inbound references.
+
+```bash
+yore mv <from> <to> --index <index-dir> [--update-refs] [--dry-run]
+```
+
+**Key options**
+
+* `--update-refs` – Rewrite Markdown links that point to `<from>` so they point to `<to>`
+* `--dry-run` – Show planned moves/rewrites without modifying files
+
+**Examples**
+
+```bash
+# Move a file and update all inbound links
+yore mv docs/old/auth.md docs/architecture/AUTH.md --index docs/.index --update-refs
+
+# Preview changes only
+yore mv docs/old/auth.md docs/architecture/AUTH.md --index docs/.index --update-refs --dry-run
+```
+
+---
+
+### 7.11 `yore backlinks`
 
 Lists all documents that link to a specified file.
 
@@ -417,7 +498,29 @@ yore backlinks docs/architecture/DEPLOYMENT-GUIDE.md --index docs/.index
 
 ---
 
-### 7.9 `yore orphans`
+### 7.12 `yore stale`
+
+Reports potentially stale documentation based on modification time and inbound links.
+
+```bash
+yore stale --index <index-dir> --days <N> --min-inlinks <M> [--json]
+```
+
+**Key options**
+
+* `--days` – Minimum age in days to consider a file stale (default: 90)
+* `--min-inlinks` – Minimum inbound link count (files with >= this many links are included; default: 0)
+* `--json` – Emit JSON output
+
+**Example**
+
+```bash
+yore stale --index docs/.index --days 90 --min-inlinks 0 --json
+```
+
+---
+
+### 7.13 `yore orphans`
 
 Finds documents with no inbound links (potential cleanup candidates or undocumented islands).
 
@@ -439,7 +542,7 @@ yore orphans --index docs/.index --exclude README --exclude INDEX
 
 ---
 
-### 7.10 `yore canonicality`
+### 7.14 `yore canonicality`
 
 Reports canonicality scores for documents based on path, naming, and other trust signals.
 
