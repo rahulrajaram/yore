@@ -4861,12 +4861,12 @@ fn run_policy_check(
         let glob = Glob::new(&rule.pattern)?;
         let matcher = glob.compile_matcher();
 
-        for (file_path, _entry) in &forward_index.files {
-            if !matcher.is_match(file_path) {
+        for file_path in forward_index.files.keys() {
+            if !matcher.is_match(file_path.as_str()) {
                 continue;
             }
 
-            let content = fs::read_to_string(file_path)?;
+            let content = fs::read_to_string(file_path.as_str())?;
             let mut rule_violations =
                 collect_policy_violations_for_content(rule, file_path, &content);
             violations.append(&mut rule_violations);
@@ -5129,7 +5129,7 @@ fn cmd_fix_references(
 
     let mut changed_files: Vec<String> = Vec::new();
 
-    for (file_path, _entry) in &forward_index.files {
+    for file_path in forward_index.files.keys() {
         let content = fs::read_to_string(file_path)?;
         let mut new_content = content.clone();
 
@@ -5397,7 +5397,7 @@ fn run_stale_check(
     let now = std::time::SystemTime::now();
     let mut files = Vec::new();
 
-    for (file_path, _) in &forward_index.files {
+    for file_path in forward_index.files.keys() {
         let meta = fs::metadata(file_path);
         if meta.is_err() {
             continue;
@@ -5512,7 +5512,7 @@ fn record_link_kind(
         .and_modify(|c| *c += 1)
         .or_insert(1);
 
-    let entry = by_file.entry(file.to_string()).or_insert_with(HashMap::new);
+    let entry = by_file.entry(file.to_string()).or_default();
     entry.entry(kind_name).and_modify(|c| *c += 1).or_insert(1);
 }
 
