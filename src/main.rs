@@ -69,7 +69,18 @@ All commands operate deterministically over the on-disk index in `--index`
     yore check-links --index .yore --json
     yore backlinks docs/architecture/DEPLOYMENT-GUIDE.md --index .yore
     yore orphans --index .yore --exclude README
-    yore canonicality --index .yore --threshold 0.7"#
+    yore canonicality --index .yore --threshold 0.7
+
+OUTPUT FORMATS
+
+  Most inspection commands support --json for structured output suitable for
+  CI pipelines and automation agents. Commands with JSON support:
+
+    build, eval, query, similar, dupes, dupes-sections, check-links,
+    fix-links, backlinks, orphans, canonicality, stale,
+    suggest-consolidation, policy, diff, stats, mv, fix-references
+
+  Example: yore check-links --index .yore --json | jq '.broken[]'"#
 )]
 struct Cli {
     #[command(subcommand)]
@@ -152,7 +163,7 @@ enum Commands {
     /// the resulting index.
     ///
     /// Example:
-    ///   yore build docs --output .yore --types md,txt
+    ///   yore build docs --output .yore --types md,txt --json
     Build {
         /// Path to index
         #[arg(default_value = ".")]
@@ -169,6 +180,14 @@ enum Commands {
         /// Patterns to exclude (can be repeated)
         #[arg(short, long)]
         exclude: Vec<String>,
+
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+
+        /// Track file renames using git history
+        #[arg(long)]
+        track_renames: bool,
     },
 
     /// Search the index for relevant documents using BM25.
@@ -196,6 +215,10 @@ enum Commands {
         /// Output as JSON
         #[arg(long)]
         json: bool,
+
+        /// Show top N distinctive terms per result (0 = disabled)
+        #[arg(long, default_value = "0")]
+        doc_terms: usize,
 
         /// Index directory
         #[arg(short, long, default_value = ".yore")]
@@ -227,6 +250,10 @@ enum Commands {
         /// Output as JSON
         #[arg(long)]
         json: bool,
+
+        /// Show top N distinctive terms per result (0 = disabled)
+        #[arg(long, default_value = "0")]
+        doc_terms: usize,
 
         /// Index directory
         #[arg(short, long, default_value = ".yore")]
@@ -296,7 +323,7 @@ enum Commands {
     /// share, helping you understand drift or duplication between them.
     ///
     /// Example:
-    ///   yore diff docs/old.md docs/new.md --index .yore
+    ///   yore diff docs/old.md docs/new.md --index .yore --json
     Diff {
         /// First file
         file1: PathBuf,
@@ -307,6 +334,10 @@ enum Commands {
         /// Index directory
         #[arg(short, long, default_value = ".yore")]
         index: PathBuf,
+
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
     },
 
     /// Show high-level index statistics.
@@ -315,7 +346,7 @@ enum Commands {
     /// is useful for sanity-checking an index and monitoring drift over time.
     ///
     /// Example:
-    ///   yore stats --index .yore --top-keywords 20
+    ///   yore stats --index .yore --top-keywords 20 --json
     Stats {
         /// Show top N keywords
         #[arg(long, default_value = "20")]
@@ -324,6 +355,10 @@ enum Commands {
         /// Index directory
         #[arg(short, long, default_value = ".yore")]
         index: PathBuf,
+
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
     },
 
     /// Interactive query REPL over the index.
@@ -371,6 +406,10 @@ enum Commands {
         #[arg(short = 'f', long, default_value = "markdown")]
         format: String,
 
+        /// Show top N distinctive terms per source document (0 = disabled)
+        #[arg(long, default_value = "0")]
+        doc_terms: usize,
+
         /// Index directory
         #[arg(short, long, default_value = ".yore")]
         index: PathBuf,
@@ -386,7 +425,7 @@ enum Commands {
     /// or index configuration.
     ///
     /// Example:
-    ///   yore eval --questions questions.jsonl --index .yore
+    ///   yore eval --questions questions.jsonl --index .yore --json
     Eval {
         /// Path to questions JSONL file
         #[arg(short, long, default_value = "questions.jsonl")]
@@ -395,6 +434,10 @@ enum Commands {
         /// Index directory
         #[arg(short, long, default_value = ".yore")]
         index: PathBuf,
+
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
     },
 
     /// Check all markdown links for validity.
@@ -509,9 +552,14 @@ enum Commands {
     /// mechanical rewrites for links that appear to point to the wrong
     /// file (for example, the right filename in the wrong directory).
     ///
+    /// For agent-friendly operation, use --propose to output ambiguous
+    /// cases to a YAML file, then --apply-decisions to apply choices.
+    ///
     /// Examples:
     ///   yore fix-links --index .yore --dry-run
     ///   yore fix-links --index .yore --apply
+    ///   yore fix-links --index .yore --propose proposals.yaml
+    ///   yore fix-links --index .yore --apply-decisions proposals.yaml
     FixLinks {
         /// Index directory
         #[arg(short, long, default_value = ".yore")]
@@ -521,9 +569,25 @@ enum Commands {
         #[arg(long)]
         dry_run: bool,
 
-        /// Apply changes to files on disk
+        /// Apply changes to files on disk (only unambiguous fixes)
         #[arg(long)]
         apply: bool,
+
+        /// Output ambiguous link fixes to a YAML file for agent/human review
+        #[arg(long)]
+        propose: Option<PathBuf>,
+
+        /// Apply decisions from a previously generated proposal file
+        #[arg(long)]
+        apply_decisions: Option<PathBuf>,
+
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+
+        /// Use git rename history to suggest fixes for moved files
+        #[arg(long)]
+        use_git_history: bool,
     },
 
     /// Rewrite references according to an explicit mapping file.
@@ -532,7 +596,7 @@ enum Commands {
     /// bulk rewrite tool, suitable for large documentation reorganizations.
     ///
     /// Example:
-    ///   yore fix-references --mapping mappings.yaml --index .yore --dry-run
+    ///   yore fix-references --mapping mappings.yaml --index .yore --dry-run --json
     FixReferences {
         /// Path to reference mapping configuration (YAML)
         #[arg(short, long)]
@@ -549,6 +613,10 @@ enum Commands {
         /// Apply changes to files on disk
         #[arg(long)]
         apply: bool,
+
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
     },
 
     /// Move a documentation file and optionally update inbound references.
@@ -558,7 +626,7 @@ enum Commands {
     /// path are rewritten to point to the new path.
     ///
     /// Examples:
-    ///   yore mv docs/old/auth.md docs/architecture/AUTH.md --update-refs --index .yore
+    ///   yore mv docs/old/auth.md docs/architecture/AUTH.md --update-refs --index .yore --json
     ///   yore mv agents/tmp/note.md agents/archive/note.md --index .yore
     Mv {
         /// Source path to move from
@@ -578,6 +646,10 @@ enum Commands {
         /// Show planned changes without modifying files
         #[arg(long)]
         dry_run: bool,
+
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
     },
 
     /// Report potentially stale documentation based on age and inbound links.
@@ -740,6 +812,95 @@ struct LinkCheckResult {
     summary: Option<LinkCheckSummary>,
 }
 
+// Diff output structure
+#[derive(Serialize, Debug)]
+struct DiffResult {
+    file1: String,
+    file2: String,
+    similarity: DiffSimilarity,
+    shared_keywords: Vec<String>,
+    only_in_file1: Vec<String>,
+    only_in_file2: Vec<String>,
+    shared_headings: Vec<String>,
+}
+
+#[derive(Serialize, Debug)]
+struct DiffSimilarity {
+    combined: f64,
+    jaccard: f64,
+    simhash: f64,
+}
+
+// Stats output structure
+#[derive(Serialize, Debug)]
+struct StatsResult {
+    total_files: usize,
+    unique_keywords: usize,
+    total_headings: usize,
+    body_keywords: usize,
+    total_links: usize,
+    index_version: u32,
+    indexed_at: String,
+    top_keywords: Vec<KeywordCount>,
+}
+
+#[derive(Serialize, Debug)]
+struct KeywordCount {
+    keyword: String,
+    count: usize,
+}
+
+// Mv output structure
+#[derive(Serialize, Debug)]
+struct MvResult {
+    from: String,
+    to: String,
+    moved: bool,
+    updated_files: Vec<String>,
+}
+
+// FixReferences output structure
+#[derive(Serialize, Debug)]
+struct FixReferencesResult {
+    mapping_file: String,
+    mappings_count: usize,
+    updated_files: Vec<String>,
+    applied: bool,
+}
+
+// Build output structure
+#[derive(Serialize, Debug)]
+struct BuildResult {
+    index_path: String,
+    files_indexed: usize,
+    total_headings: usize,
+    total_links: usize,
+    unique_keywords: usize,
+    duration_ms: u128,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    renames_tracked: Option<usize>,
+}
+
+// Eval JSON output structure
+#[derive(Serialize, Debug)]
+struct EvalJsonResult {
+    questions_file: String,
+    total_questions: usize,
+    passed: usize,
+    failed: usize,
+    pass_rate: f64,
+    results: Vec<EvalQuestionResult>,
+}
+
+#[derive(Serialize, Debug)]
+struct EvalQuestionResult {
+    question: String,
+    passed: bool,
+    expected: Vec<String>,
+    found: Vec<String>,
+    missing: Vec<String>,
+}
+
 // Policy / taxonomy structures
 #[derive(Debug, Deserialize, Default)]
 struct PolicyRule {
@@ -851,11 +1012,30 @@ struct ConsolidationResult {
     groups: Vec<ConsolidationGroup>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Serialize, Debug, Clone)]
 struct LinkFix {
     file: String,
     old_target: String,
     new_target: String,
+}
+
+// Proposal structures for agent-friendly fix-links
+#[derive(Serialize, Deserialize, Debug, Clone)]
+struct LinkFixProposal {
+    source: String,
+    line: usize,
+    broken_target: String,
+    candidates: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    decision: Option<usize>, // Index into candidates, or None to skip
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+struct LinkFixProposalFile {
+    /// Schema version for forward compatibility
+    version: u32,
+    /// Proposals for ambiguous link fixes
+    proposals: Vec<LinkFixProposal>,
 }
 
 // Backlinks structures
@@ -991,6 +1171,26 @@ struct IndexStats {
     indexed_at: String,
 }
 
+/// A single file rename event from git history
+#[derive(Serialize, Deserialize, Debug, Clone)]
+struct RenameEntry {
+    /// The old path before the rename
+    old_path: String,
+    /// The new path after the rename
+    new_path: String,
+    /// Git commit hash where the rename occurred
+    commit: String,
+}
+
+/// Git rename history for tracking file moves
+#[derive(Serialize, Deserialize, Debug, Default)]
+struct RenameHistory {
+    /// All rename events, ordered from oldest to newest
+    renames: Vec<RenameEntry>,
+    /// Indexed at timestamp
+    indexed_at: String,
+}
+
 #[derive(Deserialize, Debug, Clone)]
 struct IndexProfileConfig {
     #[serde(default)]
@@ -1000,10 +1200,60 @@ struct IndexProfileConfig {
     output: Option<String>,
 }
 
+/// Severity override for link checking based on path patterns
 #[derive(Deserialize, Debug, Clone)]
+#[allow(dead_code)] // Config scaffolding for future severity filtering
+struct SeverityOverride {
+    pattern: String,
+    severity: String,
+}
+
+/// Link checking configuration
+#[derive(Deserialize, Debug, Clone, Default)]
+#[allow(dead_code)] // Config scaffolding for future exclude patterns
+struct LinkCheckConfig {
+    #[serde(default)]
+    exclude: Vec<String>,
+    #[serde(default, rename = "severity-overrides")]
+    severity_overrides: Vec<SeverityOverride>,
+}
+
+/// External repository configuration for cross-repo link validation
+#[derive(Deserialize, Debug, Clone)]
+struct ExternalRepo {
+    path: String,
+    #[serde(default)]
+    #[allow(dead_code)] // Config scaffolding for future prefix support
+    prefix: Option<String>,
+}
+
+/// External repositories configuration
+#[derive(Deserialize, Debug, Clone, Default)]
+struct ExternalConfig {
+    #[serde(default)]
+    repos: Vec<ExternalRepo>,
+}
+
+/// Policy configuration
+#[derive(Deserialize, Debug, Clone, Default)]
+#[allow(dead_code)] // Config scaffolding for future policy file reference
+struct PolicyConfigRef {
+    #[serde(default, rename = "rules-file")]
+    rules_file: Option<String>,
+}
+
+#[derive(Deserialize, Debug, Clone, Default)]
 struct YoreConfig {
     #[serde(default)]
     index: HashMap<String, IndexProfileConfig>,
+    #[serde(default, rename = "link-check")]
+    #[allow(dead_code)] // Config scaffolding
+    link_check: Option<LinkCheckConfig>,
+    #[serde(default)]
+    #[allow(dead_code)] // Config scaffolding
+    policy: Option<PolicyConfigRef>,
+    #[serde(default)]
+    external: Option<ExternalConfig>,
 }
 
 fn load_config(path: &Path, quiet: bool) -> Option<YoreConfig> {
@@ -1149,7 +1399,13 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             // Run link checks if requested
             if links {
                 let include_summary = true;
-                let link_result = run_link_check(&index_path, None, include_summary, false)?;
+                let external_paths: Vec<String> = config
+                    .as_ref()
+                    .and_then(|c| c.external.as_ref())
+                    .map(|e| e.repos.iter().map(|r| r.path.clone()).collect())
+                    .unwrap_or_default();
+                let link_result =
+                    run_link_check(&index_path, None, include_summary, false, &external_paths)?;
                 combined.links = Some(link_result);
             }
 
@@ -1231,6 +1487,8 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             output,
             types,
             exclude,
+            json,
+            track_renames,
         } => {
             let (path, output, types, roots) =
                 resolve_build_params(path, output, types, cli.profile.as_deref(), &config);
@@ -1241,6 +1499,8 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 &exclude,
                 cli.quiet,
                 roots.as_deref(),
+                json,
+                track_renames,
             )
         }
         Commands::Query {
@@ -1248,15 +1508,17 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             limit,
             files_only,
             json,
+            doc_terms,
             index,
-        } => cmd_query(&terms, limit, files_only, json, &index),
+        } => cmd_query(&terms, limit, files_only, json, doc_terms, &index),
         Commands::Similar {
             file,
             limit,
             threshold,
             json,
+            doc_terms,
             index,
-        } => cmd_similar(&file, limit, threshold, json, &index),
+        } => cmd_similar(&file, limit, threshold, json, doc_terms, &index),
         Commands::Dupes {
             threshold,
             group,
@@ -1273,11 +1535,13 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             file1,
             file2,
             index,
-        } => cmd_diff(&file1, &file2, &index),
+            json,
+        } => cmd_diff(&file1, &file2, &index, json),
         Commands::Stats {
             top_keywords,
             index,
-        } => cmd_stats(top_keywords, &index),
+            json,
+        } => cmd_stats(top_keywords, &index, json),
         Commands::Repl { index } => cmd_repl(&index),
         Commands::Assemble {
             query,
@@ -1285,6 +1549,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             max_sections,
             depth,
             format,
+            doc_terms,
             index,
         } => cmd_assemble(
             &query.join(" "),
@@ -1292,9 +1557,14 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             max_sections,
             depth,
             &format,
+            doc_terms,
             &index,
         ),
-        Commands::Eval { questions, index } => cmd_eval(&questions, &index),
+        Commands::Eval {
+            questions,
+            index,
+            json,
+        } => cmd_eval(&questions, &index, json),
         Commands::CheckLinks {
             index,
             json,
@@ -1303,7 +1573,19 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             summary_only,
         } => {
             let index_path = resolve_index_path(index, cli.profile.as_deref(), &config);
-            cmd_check_links(&index_path, json, root.as_deref(), summary, summary_only)
+            let external_paths: Vec<String> = config
+                .as_ref()
+                .and_then(|c| c.external.as_ref())
+                .map(|e| e.repos.iter().map(|r| r.path.clone()).collect())
+                .unwrap_or_default();
+            cmd_check_links(
+                &index_path,
+                json,
+                root.as_deref(),
+                summary,
+                summary_only,
+                &external_paths,
+            )
         }
         Commands::Backlinks { file, index, json } => cmd_backlinks(&file, &index, json),
         Commands::Orphans {
@@ -1331,20 +1613,34 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             index,
             dry_run,
             apply,
-        } => cmd_fix_links(&index, dry_run, apply),
+            propose,
+            apply_decisions,
+            json,
+            use_git_history,
+        } => cmd_fix_links(
+            &index,
+            dry_run,
+            apply,
+            propose,
+            apply_decisions,
+            json,
+            use_git_history,
+        ),
         Commands::FixReferences {
             mapping,
             index,
             dry_run,
             apply,
-        } => cmd_fix_references(&index, &mapping, dry_run, apply),
+            json,
+        } => cmd_fix_references(&index, &mapping, dry_run, apply, json),
         Commands::Mv {
             from,
             to,
             index,
             update_refs,
             dry_run,
-        } => cmd_mv(&from, &to, &index, update_refs, dry_run),
+            json,
+        } => cmd_mv(&from, &to, &index, update_refs, dry_run, json),
         Commands::Stale {
             index,
             days,
@@ -1355,6 +1651,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     result
 }
 
+#[allow(clippy::too_many_arguments)]
 fn cmd_build(
     path: &Path,
     output: &Path,
@@ -1362,10 +1659,12 @@ fn cmd_build(
     exclude: &[String],
     quiet: bool,
     roots: Option<&[PathBuf]>,
+    json: bool,
+    track_renames: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let start = Instant::now();
 
-    if !quiet {
+    if !quiet && !json {
         println!("{} {}", "Indexing".cyan().bold(), path.display());
     }
 
@@ -1557,9 +1856,37 @@ fn cmd_build(
     };
     fs::write(&stats_path, serde_json::to_string_pretty(&stats)?)?;
 
+    // Track git renames if requested
+    let renames_count = if track_renames {
+        if !quiet && !json {
+            println!("  Extracting git rename history...");
+        }
+        let rename_history = extract_git_renames(path);
+        let count = rename_history.renames.len();
+        let rename_path = output.join("rename_history.json");
+        fs::write(&rename_path, serde_json::to_string_pretty(&rename_history)?)?;
+        if !quiet && !json {
+            println!("  Tracked {} file renames", count);
+        }
+        Some(count)
+    } else {
+        None
+    };
+
     let elapsed = start.elapsed();
 
-    if !quiet {
+    if json {
+        let result = BuildResult {
+            index_path: output.to_string_lossy().to_string(),
+            files_indexed: file_count,
+            total_headings,
+            total_links,
+            unique_keywords: reverse_index.keywords.len(),
+            duration_ms: elapsed.as_millis(),
+            renames_tracked: renames_count,
+        };
+        println!("{}", serde_json::to_string_pretty(&result)?);
+    } else if !quiet {
         println!();
         println!("{}", "Index Statistics".green().bold());
         println!("  Files indexed:    {}", file_count.to_string().cyan());
@@ -1740,6 +2067,59 @@ fn stem_word(word: &str) -> String {
     w
 }
 
+/// Extract top N distinctive terms from a document, excluding query terms.
+/// Returns human-readable (unstemmed) terms ranked by TF-IDF.
+fn get_top_doc_terms(
+    entry: &FileEntry,
+    idf_map: &HashMap<String, f64>,
+    exclude_terms: &[String],
+    n: usize,
+) -> Vec<String> {
+    if n == 0 {
+        return Vec::new();
+    }
+
+    // Stem the exclusion terms for comparison
+    let exclude_stemmed: HashSet<String> = exclude_terms
+        .iter()
+        .map(|t| stem_word(&t.to_lowercase()))
+        .collect();
+
+    // Collect unique keywords with their TF-IDF scores
+    // Use body_keywords (unstemmed) but rank by term_frequencies (stemmed)
+    let mut seen_stems: HashSet<String> = HashSet::new();
+    let mut term_scores: Vec<(String, f64)> = Vec::new();
+
+    for kw in entry.body_keywords.iter().chain(entry.keywords.iter()) {
+        let stemmed = stem_word(&kw.to_lowercase());
+
+        // Skip if already seen this stem, or if it's an excluded term
+        if seen_stems.contains(&stemmed) || exclude_stemmed.contains(&stemmed) {
+            continue;
+        }
+        seen_stems.insert(stemmed.clone());
+
+        // Calculate TF-IDF score
+        let tf = *entry.term_frequencies.get(&stemmed).unwrap_or(&0) as f64;
+        let idf = *idf_map.get(&stemmed).unwrap_or(&0.0);
+        let score = tf * idf;
+
+        if score > 0.0 {
+            term_scores.push((kw.to_lowercase(), score));
+        }
+    }
+
+    // Sort by score descending
+    term_scores.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+
+    // Take top N
+    term_scores
+        .into_iter()
+        .take(n)
+        .map(|(term, _)| term)
+        .collect()
+}
+
 /// Compute simhash fingerprint for content
 fn compute_simhash(content: &str) -> u64 {
     let mut v = [0i32; 64];
@@ -1912,6 +2292,7 @@ fn cmd_query(
     limit: usize,
     files_only: bool,
     json: bool,
+    doc_terms: usize,
     index_dir: &Path,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let _reverse_index = load_reverse_index(index_dir)?;
@@ -1940,7 +2321,24 @@ fn cmd_query(
     let results = file_scores;
 
     if json {
-        println!("{}", serde_json::to_string_pretty(&results)?);
+        let output: Vec<_> = results
+            .iter()
+            .map(|(path, score)| {
+                let mut obj = serde_json::json!({
+                    "path": path,
+                    "score": score
+                });
+                if doc_terms > 0 {
+                    if let Some(entry) = forward_index.files.get(path) {
+                        let top_terms =
+                            get_top_doc_terms(entry, &forward_index.idf_map, terms, doc_terms);
+                        obj["doc_terms"] = serde_json::json!(top_terms);
+                    }
+                }
+                obj
+            })
+            .collect();
+        println!("{}", serde_json::to_string_pretty(&output)?);
         return Ok(());
     }
 
@@ -1960,6 +2358,17 @@ fn cmd_query(
             println!("{}", file);
         } else {
             println!("{} (score: {:.2})", file.cyan(), score);
+
+            // Show doc terms if requested
+            if doc_terms > 0 {
+                if let Some(entry) = forward_index.files.get(&file) {
+                    let top_terms =
+                        get_top_doc_terms(entry, &forward_index.idf_map, terms, doc_terms);
+                    if !top_terms.is_empty() {
+                        println!("  {} {}", "terms:".dimmed(), top_terms.join(", "));
+                    }
+                }
+            }
 
             // Show matching headings
             if let Some(entry) = forward_index.files.get(&file) {
@@ -1996,6 +2405,7 @@ fn cmd_similar(
     limit: usize,
     threshold: f64,
     json: bool,
+    doc_terms: usize,
     index_dir: &Path,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let forward_index = load_forward_index(index_dir)?;
@@ -2028,6 +2438,14 @@ fn cmd_similar(
         .keywords
         .iter()
         .chain(ref_entry.body_keywords.iter())
+        .map(|k| k.to_lowercase())
+        .collect();
+
+    // For doc_terms, exclude the reference file's terms
+    let ref_terms_vec: Vec<String> = ref_entry
+        .body_keywords
+        .iter()
+        .chain(ref_entry.keywords.iter())
         .map(|k| k.to_lowercase())
         .collect();
 
@@ -2065,12 +2483,24 @@ fn cmd_similar(
         let output: Vec<_> = similarities
             .iter()
             .map(|(p, j, s, c)| {
-                serde_json::json!({
+                let mut obj = serde_json::json!({
                     "path": p,
                     "jaccard": j,
                     "simhash": s,
                     "combined": c
-                })
+                });
+                if doc_terms > 0 {
+                    if let Some(entry) = forward_index.files.get(p) {
+                        let top_terms = get_top_doc_terms(
+                            entry,
+                            &forward_index.idf_map,
+                            &ref_terms_vec,
+                            doc_terms,
+                        );
+                        obj["doc_terms"] = serde_json::json!(top_terms);
+                    }
+                }
+                obj
             })
             .collect();
         println!("{}", serde_json::to_string_pretty(&output)?);
@@ -2097,6 +2527,21 @@ fn cmd_similar(
             sim_pct.to_string().yellow(),
             path
         );
+
+        // Show doc terms if requested
+        if doc_terms > 0 {
+            if let Some(entry) = forward_index.files.get(&path) {
+                let top_terms =
+                    get_top_doc_terms(entry, &forward_index.idf_map, &ref_terms_vec, doc_terms);
+                if !top_terms.is_empty() {
+                    println!(
+                        "                   {} {}",
+                        "terms:".dimmed(),
+                        top_terms.join(", ")
+                    );
+                }
+            }
+        }
     }
 
     Ok(())
@@ -2458,6 +2903,7 @@ fn cmd_diff(
     file1: &Path,
     file2: &Path,
     index_dir: &Path,
+    json: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let forward_index = load_forward_index(index_dir)?;
 
@@ -2511,6 +2957,46 @@ fn cmd_diff(
     let jaccard = jaccard_similarity(&kw1, &kw2);
     let simhash_sim = simhash_similarity(entry1.simhash, entry2.simhash);
     let combined = jaccard * 0.6 + simhash_sim * 0.4;
+
+    // Show shared headings
+    let h1: HashSet<String> = entry1
+        .headings
+        .iter()
+        .map(|h| h.text.to_lowercase())
+        .collect();
+    let h2: HashSet<String> = entry2
+        .headings
+        .iter()
+        .map(|h| h.text.to_lowercase())
+        .collect();
+    let shared_headings: Vec<String> = h1.intersection(&h2).cloned().collect();
+
+    if json {
+        let mut shared_vec: Vec<_> = shared.iter().cloned().collect();
+        shared_vec.sort();
+        let mut only1_vec: Vec<_> = only_in_1.iter().cloned().collect();
+        only1_vec.sort();
+        let mut only2_vec: Vec<_> = only_in_2.iter().cloned().collect();
+        only2_vec.sort();
+        let mut headings_vec = shared_headings.clone();
+        headings_vec.sort();
+
+        let result = DiffResult {
+            file1: path1,
+            file2: path2,
+            similarity: DiffSimilarity {
+                combined,
+                jaccard,
+                simhash: simhash_sim,
+            },
+            shared_keywords: shared_vec,
+            only_in_file1: only1_vec,
+            only_in_file2: only2_vec,
+            shared_headings: headings_vec,
+        };
+        println!("{}", serde_json::to_string_pretty(&result)?);
+        return Ok(());
+    }
 
     println!("{}", "Comparison".green().bold());
     println!();
@@ -2595,19 +3081,6 @@ fn cmd_diff(
     if only_in_2.len() > 24 {
         println!("  ... and {} more", only_in_2.len() - 24);
     }
-
-    // Show shared headings
-    let h1: HashSet<String> = entry1
-        .headings
-        .iter()
-        .map(|h| h.text.to_lowercase())
-        .collect();
-    let h2: HashSet<String> = entry2
-        .headings
-        .iter()
-        .map(|h| h.text.to_lowercase())
-        .collect();
-    let shared_headings: Vec<_> = h1.intersection(&h2).collect();
 
     if !shared_headings.is_empty() {
         println!();
@@ -2810,7 +3283,11 @@ fn cmd_dupes_sections(
     Ok(())
 }
 
-fn cmd_stats(top_keywords: usize, index_dir: &Path) -> Result<(), Box<dyn std::error::Error>> {
+fn cmd_stats(
+    top_keywords: usize,
+    index_dir: &Path,
+    json: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
     let forward_index = load_forward_index(index_dir)?;
     let reverse_index = load_reverse_index(index_dir)?;
 
@@ -2829,6 +3306,28 @@ fn cmd_stats(top_keywords: usize, index_dir: &Path) -> Result<(), Box<dyn std::e
         .values()
         .map(|e| e.body_keywords.len())
         .sum();
+
+    if json {
+        let result = StatsResult {
+            total_files: forward_index.files.len(),
+            unique_keywords: reverse_index.keywords.len(),
+            total_headings,
+            body_keywords: total_body_keywords,
+            total_links,
+            index_version: forward_index.version,
+            indexed_at: forward_index.indexed_at.clone(),
+            top_keywords: keyword_counts
+                .iter()
+                .take(top_keywords)
+                .map(|(k, c)| KeywordCount {
+                    keyword: k.clone(),
+                    count: *c,
+                })
+                .collect(),
+        };
+        println!("{}", serde_json::to_string_pretty(&result)?);
+        return Ok(());
+    }
 
     println!("{}", "Index Statistics".green().bold());
     println!();
@@ -2902,14 +3401,14 @@ fn cmd_repl(index_dir: &Path) -> Result<(), Box<dyn std::error::Error>> {
                 if terms.is_empty() {
                     println!("{}", "Usage: query <terms...>".yellow());
                 } else {
-                    let _ = cmd_query(&terms, 10, false, false, index_dir);
+                    let _ = cmd_query(&terms, 10, false, false, 0, index_dir);
                 }
             }
             "similar" => {
                 if parts.len() < 2 {
                     println!("{}", "Usage: similar <file>".yellow());
                 } else {
-                    let _ = cmd_similar(Path::new(parts[1]), 5, 0.3, false, index_dir);
+                    let _ = cmd_similar(Path::new(parts[1]), 5, 0.3, false, 0, index_dir);
                 }
             }
             "dupes" => {
@@ -2919,16 +3418,16 @@ fn cmd_repl(index_dir: &Path) -> Result<(), Box<dyn std::error::Error>> {
                 if parts.len() < 3 {
                     println!("{}", "Usage: diff <file1> <file2>".yellow());
                 } else {
-                    let _ = cmd_diff(Path::new(parts[1]), Path::new(parts[2]), index_dir);
+                    let _ = cmd_diff(Path::new(parts[1]), Path::new(parts[2]), index_dir, false);
                 }
             }
             "stats" => {
-                let _ = cmd_stats(10, index_dir);
+                let _ = cmd_stats(10, index_dir, false);
             }
             _ => {
                 // Treat as query
                 let terms: Vec<String> = parts.iter().map(|s| s.to_string()).collect();
-                let _ = cmd_query(&terms, 10, false, false, index_dir);
+                let _ = cmd_query(&terms, 10, false, false, 0, index_dir);
             }
         }
         println!();
@@ -2969,6 +3468,142 @@ fn chrono_now() -> String {
     use std::time::{SystemTime, UNIX_EPOCH};
     let duration = SystemTime::now().duration_since(UNIX_EPOCH).unwrap();
     format!("{}", duration.as_secs())
+}
+
+/// Extract file rename history from git
+///
+/// Runs `git log --name-status --diff-filter=R` to find all renames in the repo.
+/// Returns empty history if not in a git repo or git is unavailable.
+fn extract_git_renames(path: &Path) -> RenameHistory {
+    use std::process::Command;
+
+    let output = Command::new("git")
+        .args([
+            "log",
+            "--name-status",
+            "--diff-filter=R",
+            "--pretty=format:%H",
+            "-M",
+            "--",
+        ])
+        .current_dir(path)
+        .output();
+
+    let output = match output {
+        Ok(o) if o.status.success() => o,
+        _ => {
+            return RenameHistory {
+                renames: vec![],
+                indexed_at: chrono_now(),
+            };
+        }
+    };
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let mut renames = Vec::new();
+    let mut current_commit = String::new();
+
+    for line in stdout.lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+
+        // Check if this is a commit hash (40 hex chars)
+        if line.len() == 40 && line.chars().all(|c| c.is_ascii_hexdigit()) {
+            current_commit = line.to_string();
+        } else if line.starts_with("R") {
+            // Rename line: R<score>\told_path\tnew_path
+            let parts: Vec<&str> = line.splitn(3, '\t').collect();
+            if parts.len() == 3 {
+                renames.push(RenameEntry {
+                    old_path: parts[1].to_string(),
+                    new_path: parts[2].to_string(),
+                    commit: current_commit.clone(),
+                });
+            }
+        }
+    }
+
+    // Reverse to get oldest-first order
+    renames.reverse();
+
+    RenameHistory {
+        renames,
+        indexed_at: chrono_now(),
+    }
+}
+
+/// Look up the current path for a file that may have been renamed.
+/// Returns the most recent path if renames exist, or None if no rename history.
+fn resolve_renamed_path(old_path: &str, history: &RenameHistory) -> Option<String> {
+    let mut current = old_path.to_string();
+    let mut found_any = false;
+
+    for entry in &history.renames {
+        if entry.old_path == current {
+            current = entry.new_path.clone();
+            found_any = true;
+        }
+    }
+
+    if found_any {
+        Some(current)
+    } else {
+        None
+    }
+}
+
+/// Compute the relative path from source file to target file.
+/// Returns the relative link path as it would appear in markdown.
+fn compute_relative_path(
+    source: &str,
+    target: &str,
+    _available_files: &HashSet<String>,
+) -> Option<String> {
+    let source_path = Path::new(source);
+    let target_path = Path::new(target);
+
+    // Get the directory containing the source file
+    let source_dir = source_path.parent()?;
+
+    // Try to compute relative path
+    if let Ok(rel) = target_path.strip_prefix(source_dir) {
+        return Some(rel.to_string_lossy().to_string());
+    }
+
+    // Need to go up directories - find common ancestor
+    let source_components: Vec<_> = source_dir.components().collect();
+    let target_components: Vec<_> = target_path.components().collect();
+
+    // Find common prefix length
+    let common_len = source_components
+        .iter()
+        .zip(target_components.iter())
+        .take_while(|(a, b)| a == b)
+        .count();
+
+    // Build relative path: go up (source_components.len() - common_len) times, then down to target
+    let ups = source_components.len() - common_len;
+    let mut result = String::new();
+
+    for _ in 0..ups {
+        result.push_str("../");
+    }
+
+    // Add remaining target path components
+    for (i, comp) in target_components.iter().enumerate().skip(common_len) {
+        if i > common_len {
+            result.push('/');
+        }
+        result.push_str(&comp.as_os_str().to_string_lossy());
+    }
+
+    if result.is_empty() {
+        None
+    } else {
+        Some(result)
+    }
 }
 
 // ============================================================================
@@ -4139,6 +4774,7 @@ fn cmd_assemble(
     max_sections: usize,
     depth: usize,
     format: &str,
+    doc_terms: usize,
     index_dir: &Path,
 ) -> Result<(), Box<dyn std::error::Error>> {
     if format != "markdown" {
@@ -4198,6 +4834,29 @@ fn cmd_assemble(
     let max_tokens_per_section = max_tokens / all_sections.len().max(1);
     let refined_sections = apply_extractive_refiner(all_sections, query, max_tokens_per_section);
 
+    // If doc_terms requested, prepend a source summary
+    if doc_terms > 0 {
+        println!("<!-- Source Documents -->");
+        let query_terms: Vec<String> = extract_keywords(query);
+        let mut seen_docs: HashSet<String> = HashSet::new();
+
+        for section in &refined_sections {
+            if seen_docs.contains(&section.doc_path) {
+                continue;
+            }
+            seen_docs.insert(section.doc_path.clone());
+
+            if let Some(entry) = forward_index.files.get(&section.doc_path) {
+                let top_terms =
+                    get_top_doc_terms(entry, &forward_index.idf_map, &query_terms, doc_terms);
+                if !top_terms.is_empty() {
+                    println!("<!-- {} : {} -->", section.doc_path, top_terms.join(", "));
+                }
+            }
+        }
+        println!();
+    }
+
     // Phase 4: Distill to markdown
     let digest = distill_to_markdown(&refined_sections, query, max_tokens);
 
@@ -4207,7 +4866,11 @@ fn cmd_assemble(
 }
 
 /// Evaluation command handler - runs retrieval pipeline against test questions
-fn cmd_eval(questions_path: &Path, index_dir: &Path) -> Result<(), Box<dyn std::error::Error>> {
+fn cmd_eval(
+    questions_path: &Path,
+    index_dir: &Path,
+    json: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
     // Load questions from JSONL file
     let questions_content = fs::read_to_string(questions_path)?;
     let questions: Vec<Question> = questions_content
@@ -4217,7 +4880,14 @@ fn cmd_eval(questions_path: &Path, index_dir: &Path) -> Result<(), Box<dyn std::
         .collect::<Result<Vec<_>, _>>()?;
 
     if questions.is_empty() {
-        println!("No questions found in {}", questions_path.display());
+        if json {
+            println!(
+                r#"{{"questions_file": "{}", "total_questions": 0, "error": "No questions found"}}"#,
+                questions_path.display()
+            );
+        } else {
+            println!("No questions found in {}", questions_path.display());
+        }
         return Ok(());
     }
 
@@ -4303,7 +4973,53 @@ fn cmd_eval(questions_path: &Path, index_dir: &Path) -> Result<(), Box<dyn std::
         });
     }
 
-    // Print results
+    // Calculate summary
+    let passed_count = results.iter().filter(|r| r.passed).count();
+    let total = results.len();
+    let pass_rate_pct = passed_count as f64 / total as f64 * 100.0;
+
+    if json {
+        let json_results: Vec<EvalQuestionResult> = results
+            .iter()
+            .map(|r| {
+                let expected: Vec<String> = questions
+                    .iter()
+                    .find(|q| q.id == r.id)
+                    .map(|q| q.expect.clone())
+                    .unwrap_or_default();
+                let found: Vec<String> = expected
+                    .iter()
+                    .filter(|e| r.question.to_lowercase().contains(&e.to_lowercase()))
+                    .cloned()
+                    .collect();
+                let missing: Vec<String> = expected
+                    .iter()
+                    .filter(|e| !r.question.to_lowercase().contains(&e.to_lowercase()))
+                    .cloned()
+                    .collect();
+                EvalQuestionResult {
+                    question: r.question.clone(),
+                    passed: r.passed,
+                    expected,
+                    found,
+                    missing,
+                }
+            })
+            .collect();
+
+        let output = EvalJsonResult {
+            questions_file: questions_path.to_string_lossy().to_string(),
+            total_questions: total,
+            passed: passed_count,
+            failed: total - passed_count,
+            pass_rate: pass_rate_pct,
+            results: json_results,
+        };
+        println!("{}", serde_json::to_string_pretty(&output)?);
+        return Ok(());
+    }
+
+    // Print results (human-readable)
     println!("\n{}", "Evaluation Results".cyan().bold());
     println!("{}", "=".repeat(60));
     println!();
@@ -4322,17 +5038,16 @@ fn cmd_eval(questions_path: &Path, index_dir: &Path) -> Result<(), Box<dyn std::
     }
 
     // Print summary
-    let passed = results.iter().filter(|r| r.passed).count();
-    let total = results.len();
-    let pass_rate = (passed as f64 / total as f64 * 100.0) as usize;
-
     println!("{}", "=".repeat(60));
     println!("{}", "Summary".cyan().bold());
-    println!("  Passed: {}/{} ({}%)", passed, total, pass_rate);
-    println!("  Failed: {}/{}", total - passed, total);
+    println!(
+        "  Passed: {}/{} ({:.0}%)",
+        passed_count, total, pass_rate_pct
+    );
+    println!("  Failed: {}/{}", total - passed_count, total);
     println!();
 
-    if passed < total {
+    if passed_count < total {
         println!("{}", "Failed Questions:".yellow().bold());
         for result in &results {
             if !result.passed {
@@ -4355,6 +5070,7 @@ fn run_link_check(
     root: Option<&Path>,
     include_summary: bool,
     summary_only: bool,
+    external_paths: &[String],
 ) -> Result<LinkCheckResult, Box<dyn std::error::Error>> {
     // Load the forward index
     let forward_index = load_forward_index(index_dir)?;
@@ -4507,6 +5223,43 @@ fn run_link_check(
                         );
                     }
                 } else {
+                    // File not found locally - check external repos
+                    let mut found_in_external = false;
+                    for ext_path in external_paths {
+                        // Check if the link might be pointing to an external repo
+                        // by seeing if the normalized path contains the external path pattern
+                        if normalized_path.contains(ext_path) {
+                            // The link references an external repo path, try to resolve it
+                            if Path::new(&normalized_path).exists() {
+                                found_in_external = true;
+                                record_link_kind(
+                                    &mut counts_by_file,
+                                    &mut counts_by_kind,
+                                    file_path,
+                                    &LinkKind::ExternalReference,
+                                );
+                                break;
+                            }
+                        }
+                        // Also check if it's a relative path that would resolve to external repo
+                        let resolved_ext = Path::new(ext_path)
+                            .join(Path::new(&link_path).file_name().unwrap_or_default());
+                        if resolved_ext.exists() {
+                            found_in_external = true;
+                            record_link_kind(
+                                &mut counts_by_file,
+                                &mut counts_by_kind,
+                                file_path,
+                                &LinkKind::ExternalReference,
+                            );
+                            break;
+                        }
+                    }
+
+                    if found_in_external {
+                        continue;
+                    }
+
                     // Missing target file: classify as doc_missing or code_missing
                     let ext = file_extension(&normalized_path);
                     let kind = if is_code_extension(&ext) {
@@ -4619,9 +5372,16 @@ fn cmd_check_links(
     root: Option<&Path>,
     summary_flag: bool,
     summary_only: bool,
+    external_paths: &[String],
 ) -> Result<(), Box<dyn std::error::Error>> {
     let include_summary = summary_flag || summary_only || !json;
-    let result = run_link_check(index_dir, root, include_summary, summary_only)?;
+    let result = run_link_check(
+        index_dir,
+        root,
+        include_summary,
+        summary_only,
+        external_paths,
+    )?;
 
     if json {
         println!("{}", serde_json::to_string_pretty(&result)?);
@@ -4931,21 +5691,27 @@ fn cmd_policy(
 /// Very conservative: only rewrites when there is exactly one file with
 /// the same filename as the link target and that file lives under the
 /// same parent directory as the source file.
-fn suggest_new_link_target(
+/// Find all candidate files that match the broken link's filename
+fn find_link_candidates(
     source_file: &str,
     link_path: &str,
     available_files: &HashSet<String>,
-) -> Option<String> {
+) -> Vec<String> {
     if link_path.is_empty() {
-        return None;
+        return vec![];
     }
 
-    let link_filename = Path::new(link_path).file_name().and_then(|s| s.to_str())?;
+    let link_filename = match Path::new(link_path).file_name().and_then(|s| s.to_str()) {
+        Some(f) => f,
+        None => return vec![],
+    };
+
+    let source_path = Path::new(source_file);
+    let source_parent = source_path.parent().unwrap_or(Path::new("."));
 
     // Find all candidates whose filename matches
-    let candidates: Vec<&str> = available_files
+    let mut candidates: Vec<String> = available_files
         .iter()
-        .map(|s| s.as_str())
         .filter(|p| {
             Path::new(p)
                 .file_name()
@@ -4953,42 +5719,80 @@ fn suggest_new_link_target(
                 .map(|name| name == link_filename)
                 .unwrap_or(false)
         })
+        .map(|candidate| {
+            // Try to create a relative path from source to candidate
+            let candidate_path = Path::new(candidate);
+            if let Ok(stripped) = candidate_path.strip_prefix(source_parent) {
+                let rel = stripped.to_string_lossy().to_string();
+                if !rel.is_empty() {
+                    return rel;
+                }
+            }
+            // Fall back to returning the full path
+            candidate.clone()
+        })
         .collect();
 
-    if candidates.len() != 1 {
-        return None;
+    candidates.sort();
+    candidates
+}
+
+#[allow(dead_code)] // Utility for future interactive fix mode
+fn suggest_new_link_target(
+    source_file: &str,
+    link_path: &str,
+    available_files: &HashSet<String>,
+) -> Option<String> {
+    let candidates = find_link_candidates(source_file, link_path, available_files);
+    if candidates.len() == 1 {
+        Some(candidates.into_iter().next().unwrap())
+    } else {
+        None
     }
-
-    let candidate = Path::new(candidates[0]);
-    let source_path = Path::new(source_file);
-    let source_parent = source_path.parent().unwrap_or(Path::new("."));
-
-    // Only handle the simple case where candidate is under the same parent
-    if let Ok(stripped) = candidate.strip_prefix(source_parent) {
-        let rel = stripped.to_string_lossy().to_string();
-        if !rel.is_empty() {
-            return Some(rel);
-        }
-    }
-
-    None
 }
 
 fn cmd_fix_links(
     index_dir: &Path,
     dry_run: bool,
     apply: bool,
+    propose: Option<PathBuf>,
+    apply_decisions: Option<PathBuf>,
+    json: bool,
+    use_git_history: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    if !dry_run && !apply {
-        return Err("Specify either --dry-run or --apply".into());
+    // Handle apply-decisions mode: read and apply a proposal file
+    if let Some(decisions_path) = apply_decisions {
+        return apply_link_decisions(&decisions_path, dry_run, json);
+    }
+
+    // Validate mode flags for regular operation
+    let propose_mode = propose.is_some();
+    if !propose_mode && !dry_run && !apply {
+        return Err("Specify --dry-run, --apply, or --propose <file>".into());
     }
 
     let forward_index = load_forward_index(index_dir)?;
-
-    // Build set of available files from the index
     let available_files: HashSet<String> = forward_index.files.keys().cloned().collect();
 
+    // Load git rename history if requested and available
+    let rename_history: Option<RenameHistory> = if use_git_history {
+        let rename_path = index_dir.join("rename_history.json");
+        if rename_path.exists() {
+            let content = fs::read_to_string(&rename_path)?;
+            Some(serde_json::from_str(&content)?)
+        } else {
+            eprintln!(
+                "Warning: --use-git-history requested but no rename_history.json found. \
+                 Run 'yore build --track-renames' first."
+            );
+            None
+        }
+    } else {
+        None
+    };
+
     let mut fixes: Vec<LinkFix> = Vec::new();
+    let mut proposals: Vec<LinkFixProposal> = Vec::new();
 
     for (file_path, entry) in &forward_index.files {
         for link in &entry.links {
@@ -5003,7 +5807,7 @@ fn cmd_fix_links(
                 continue;
             }
 
-            // Split off anchor (we only rewrite the path component)
+            // Split off anchor
             let (link_path, anchor) = if let Some(idx) = target.find('#') {
                 (
                     target[..idx].to_string(),
@@ -5013,7 +5817,7 @@ fn cmd_fix_links(
                 (target.clone(), None)
             };
 
-            // Only consider links that do not resolve to an existing indexed file
+            // Check if link resolves
             let source_path = Path::new(file_path);
             let resolved = if link_path.is_empty() {
                 file_path.clone()
@@ -5028,12 +5832,39 @@ fn cmd_fix_links(
                 continue;
             }
 
-            if let Some(new_rel) = suggest_new_link_target(file_path, &link_path, &available_files)
-            {
-                let mut new_target = new_rel;
-                if let Some(a) = anchor {
+            // Find candidates using index-based matching
+            let mut candidates = find_link_candidates(file_path, &link_path, &available_files);
+
+            // If no candidates found and git history is available, check for renames
+            if candidates.is_empty() {
+                if let Some(ref history) = rename_history {
+                    // Try to resolve the old path to its current location
+                    if let Some(new_path) = resolve_renamed_path(&normalized, history) {
+                        // Check if the new path exists in available files
+                        if available_files.contains(&new_path) {
+                            // Convert to relative path from source
+                            if let Some(rel) =
+                                compute_relative_path(file_path, &new_path, &available_files)
+                            {
+                                candidates.push(rel);
+                            } else {
+                                candidates.push(new_path);
+                            }
+                        }
+                    }
+                }
+            }
+
+            if candidates.is_empty() {
+                continue;
+            }
+
+            if candidates.len() == 1 {
+                // Unambiguous fix
+                let mut new_target = candidates[0].clone();
+                if let Some(ref a) = anchor {
                     new_target.push('#');
-                    new_target.push_str(&a);
+                    new_target.push_str(a);
                 }
                 if new_target != *target {
                     fixes.push(LinkFix {
@@ -5042,30 +5873,99 @@ fn cmd_fix_links(
                         new_target,
                     });
                 }
+            } else if propose_mode {
+                // Multiple candidates - add to proposals
+                proposals.push(LinkFixProposal {
+                    source: file_path.clone(),
+                    line: link.line,
+                    broken_target: target.clone(),
+                    candidates,
+                    decision: None,
+                });
             }
         }
     }
 
+    // Handle propose mode: write proposals to file
+    if let Some(propose_path) = propose {
+        let proposal_file = LinkFixProposalFile {
+            version: 1,
+            proposals,
+        };
+        let yaml = serde_yaml::to_string(&proposal_file)?;
+        fs::write(&propose_path, &yaml)?;
+
+        if json {
+            #[derive(Serialize)]
+            struct ProposeResult {
+                proposal_file: String,
+                unambiguous_fixes: usize,
+                ambiguous_proposals: usize,
+            }
+            let result = ProposeResult {
+                proposal_file: propose_path.to_string_lossy().to_string(),
+                unambiguous_fixes: fixes.len(),
+                ambiguous_proposals: proposal_file.proposals.len(),
+            };
+            println!("{}", serde_json::to_string_pretty(&result)?);
+        } else {
+            println!(
+                "{} Wrote {} ambiguous proposals to {}",
+                "Propose:".cyan().bold(),
+                proposal_file.proposals.len(),
+                propose_path.display()
+            );
+            println!(
+                "{} {} unambiguous fixes available (use --apply to apply)",
+                "Info:".yellow(),
+                fixes.len()
+            );
+        }
+        return Ok(());
+    }
+
+    // Regular fix mode (dry-run or apply)
     if fixes.is_empty() {
-        println!("{}", "No safe link fixes found.".green().bold());
+        if json {
+            println!(r#"{{"fixes": [], "applied": false}}"#);
+        } else {
+            println!("{}", "No safe link fixes found.".green().bold());
+        }
         return Ok(());
     }
 
     // Group fixes by file
     let mut fixes_by_file: HashMap<String, Vec<LinkFix>> = HashMap::new();
-    for fix in fixes {
-        fixes_by_file.entry(fix.file.clone()).or_default().push(fix);
+    for fix in &fixes {
+        fixes_by_file
+            .entry(fix.file.clone())
+            .or_default()
+            .push(fix.clone());
     }
 
-    println!(
-        "{} Proposed link fixes in {} file(s):",
-        if dry_run { "Previewing" } else { "Applying" },
-        fixes_by_file.len()
-    );
-    for (file, file_fixes) in &fixes_by_file {
-        println!("{}", file.white().bold());
-        for f in file_fixes {
-            println!("  {} -> {}", f.old_target.red(), f.new_target.green());
+    if json {
+        let result = serde_json::json!({
+            "fixes": fixes.iter().map(|f| {
+                serde_json::json!({
+                    "file": f.file,
+                    "old_target": f.old_target,
+                    "new_target": f.new_target
+                })
+            }).collect::<Vec<_>>(),
+            "applied": apply
+        });
+        println!("{}", serde_json::to_string_pretty(&result)?);
+    } else {
+        println!(
+            "{} Proposed link fixes in {} file(s):",
+            if dry_run { "Previewing" } else { "Applying" },
+            fixes_by_file.len()
+        );
+        for (file, file_fixes) in &fixes_by_file {
+            println!("{}", file.white().bold());
+            for f in file_fixes {
+                println!("  {} -> {}", f.old_target.red(), f.new_target.green());
+            }
         }
     }
 
@@ -5082,7 +5982,108 @@ fn cmd_fix_links(
                 fs::write(file, new_content)?;
             }
         }
-        println!("{}", "Link fixes applied.".green().bold());
+        if !json {
+            println!("{}", "Link fixes applied.".green().bold());
+        }
+    }
+
+    Ok(())
+}
+
+/// Apply decisions from a proposal file
+fn apply_link_decisions(
+    decisions_path: &Path,
+    dry_run: bool,
+    json: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let content = fs::read_to_string(decisions_path)?;
+    let proposal_file: LinkFixProposalFile = serde_yaml::from_str(&content)?;
+
+    let mut fixes: Vec<LinkFix> = Vec::new();
+
+    for proposal in &proposal_file.proposals {
+        if let Some(decision_idx) = proposal.decision {
+            if decision_idx < proposal.candidates.len() {
+                let mut new_target = proposal.candidates[decision_idx].clone();
+                // Preserve anchor if present in broken_target
+                if let Some(idx) = proposal.broken_target.find('#') {
+                    new_target.push_str(&proposal.broken_target[idx..]);
+                }
+                fixes.push(LinkFix {
+                    file: proposal.source.clone(),
+                    old_target: proposal.broken_target.clone(),
+                    new_target,
+                });
+            }
+        }
+    }
+
+    if fixes.is_empty() {
+        if json {
+            println!(
+                r#"{{"fixes": [], "applied": false, "message": "No decisions made in proposal file"}}"#
+            );
+        } else {
+            println!(
+                "{} No decisions found in {}. Set 'decision' field to candidate index.",
+                "Note:".yellow(),
+                decisions_path.display()
+            );
+        }
+        return Ok(());
+    }
+
+    // Group and apply
+    let mut fixes_by_file: HashMap<String, Vec<LinkFix>> = HashMap::new();
+    for fix in &fixes {
+        fixes_by_file
+            .entry(fix.file.clone())
+            .or_default()
+            .push(fix.clone());
+    }
+
+    if json {
+        let result = serde_json::json!({
+            "fixes": fixes.iter().map(|f| {
+                serde_json::json!({
+                    "file": f.file,
+                    "old_target": f.old_target,
+                    "new_target": f.new_target
+                })
+            }).collect::<Vec<_>>(),
+            "applied": !dry_run
+        });
+        println!("{}", serde_json::to_string_pretty(&result)?);
+    } else {
+        println!(
+            "{} {} link fixes from decisions:",
+            if dry_run { "Would apply" } else { "Applying" },
+            fixes.len()
+        );
+        for (file, file_fixes) in &fixes_by_file {
+            println!("{}", file.white().bold());
+            for f in file_fixes {
+                println!("  {} -> {}", f.old_target.red(), f.new_target.green());
+            }
+        }
+    }
+
+    if !dry_run {
+        for (file, file_fixes) in &fixes_by_file {
+            let content = fs::read_to_string(file)?;
+            let mut new_content = content.clone();
+            for f in file_fixes {
+                let old = format!("]({})", f.old_target);
+                let new = format!("]({})", f.new_target);
+                new_content = new_content.replace(&old, &new);
+            }
+            if new_content != content {
+                fs::write(file, new_content)?;
+            }
+        }
+        if !json {
+            println!("{}", "Link fixes applied.".green().bold());
+        }
     }
 
     Ok(())
@@ -5107,6 +6108,7 @@ fn cmd_fix_references(
     mapping_path: &Path,
     dry_run: bool,
     apply: bool,
+    json: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     if !dry_run && !apply {
         return Err("Specify either --dry-run or --apply".into());
@@ -5117,11 +6119,21 @@ fn cmd_fix_references(
 
     let mappings_cfg = load_reference_mappings(mapping_path)?;
     if mappings_cfg.mappings.is_empty() {
-        println!(
-            "{} No mappings defined in {}",
-            "Note:".yellow(),
-            mapping_path.display()
-        );
+        if json {
+            let result = FixReferencesResult {
+                mapping_file: mapping_path.to_string_lossy().to_string(),
+                mappings_count: 0,
+                updated_files: vec![],
+                applied: apply,
+            };
+            println!("{}", serde_json::to_string_pretty(&result)?);
+        } else {
+            println!(
+                "{} No mappings defined in {}",
+                "Note:".yellow(),
+                mapping_path.display()
+            );
+        }
         return Ok(());
     }
 
@@ -5145,6 +6157,19 @@ fn cmd_fix_references(
                 changed_files.push(file_path.clone());
             }
         }
+    }
+
+    changed_files.sort();
+
+    if json {
+        let result = FixReferencesResult {
+            mapping_file: mapping_path.to_string_lossy().to_string(),
+            mappings_count: mappings_cfg.mappings.len(),
+            updated_files: changed_files,
+            applied: apply,
+        };
+        println!("{}", serde_json::to_string_pretty(&result)?);
+        return Ok(());
     }
 
     if changed_files.is_empty() {
@@ -5174,20 +6199,12 @@ fn cmd_mv(
     index_dir: &Path,
     update_refs: bool,
     dry_run: bool,
+    json: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let from_str = from.to_string_lossy().to_string();
     let to_str = to.to_string_lossy().to_string();
 
-    if dry_run {
-        println!("{}", "Dry run:".cyan().bold());
-    }
-
-    println!(
-        "{} {} -> {}",
-        if dry_run { "Would move" } else { "Moving" },
-        from_str,
-        to_str
-    );
+    let mut updated_files: Vec<String> = Vec::new();
 
     if !dry_run {
         if let Some(parent) = to.parent() {
@@ -5209,32 +6226,63 @@ fn cmd_mv(
             }
         }
 
-        if files_to_update.is_empty() {
+        for file in &files_to_update {
+            let content = fs::read_to_string(file)?;
+            let new_content = apply_reference_mapping_to_content(&content, &from_str, &to_str);
+            if content != new_content {
+                if !dry_run {
+                    fs::write(file, &new_content)?;
+                }
+                updated_files.push(file.clone());
+            }
+        }
+    }
+
+    updated_files.sort();
+
+    if json {
+        let result = MvResult {
+            from: from_str,
+            to: to_str,
+            moved: !dry_run,
+            updated_files,
+        };
+        println!("{}", serde_json::to_string_pretty(&result)?);
+        return Ok(());
+    }
+
+    // Human-readable output
+    if dry_run {
+        println!("{}", "Dry run:".cyan().bold());
+    }
+
+    println!(
+        "{} {} -> {}",
+        if dry_run { "Would move" } else { "Moving" },
+        from_str,
+        to_str
+    );
+
+    if update_refs {
+        if updated_files.is_empty() {
             println!(
                 "{} No inbound links found for {} in index {}",
                 "Note:".yellow(),
                 from_str,
                 index_dir.display()
             );
-            return Ok(());
-        }
-
-        println!(
-            "{} Updating references in {} file(s)",
-            if dry_run { "Would update" } else { "Updating" },
-            files_to_update.len()
-        );
-
-        for file in files_to_update {
-            let content = fs::read_to_string(&file)?;
-            let new_content = apply_reference_mapping_to_content(&content, &from_str, &to_str);
-            if dry_run {
-                if content != new_content {
+        } else {
+            println!(
+                "{} Updating references in {} file(s)",
+                if dry_run { "Would update" } else { "Updating" },
+                updated_files.len()
+            );
+            for file in updated_files {
+                if dry_run {
                     println!("  {} (references would change)", file);
+                } else {
+                    println!("  {}", file);
                 }
-            } else if content != new_content {
-                fs::write(&file, new_content)?;
-                println!("  {}", file);
             }
         }
     }
@@ -6699,5 +7747,628 @@ Some content here.
         assert!(ctx.ends_with("..."));
 
         fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn test_get_top_doc_terms_basic() {
+        // Setup: doc with term frequencies and IDF map
+        // Note: term_frequencies and idf_map use STEMMED keys
+        // "docker" -> "dock", "nginx" -> "nginx", "helm" -> "helm"
+        let mut term_frequencies = HashMap::new();
+        term_frequencies.insert("dock".to_string(), 10); // stem of "docker"
+        term_frequencies.insert("nginx".to_string(), 5);
+        term_frequencies.insert("helm".to_string(), 3);
+
+        let entry = FileEntry {
+            path: "test.md".to_string(),
+            size_bytes: 100,
+            line_count: 10,
+            headings: vec![],
+            keywords: vec![],
+            body_keywords: vec![
+                "docker".to_string(),
+                "nginx".to_string(),
+                "helm".to_string(),
+                "container".to_string(), // not in tf, will be excluded
+            ],
+            links: vec![],
+            simhash: 0,
+            term_frequencies,
+            doc_length: 100,
+            minhash: vec![],
+            section_fingerprints: vec![],
+        };
+
+        let mut idf_map = HashMap::new();
+        idf_map.insert("dock".to_string(), 2.0); // stemmed
+        idf_map.insert("nginx".to_string(), 1.5);
+        idf_map.insert("helm".to_string(), 3.0);
+
+        // Test: get top 2 terms, excluding nothing
+        let terms = get_top_doc_terms(&entry, &idf_map, &[], 2);
+
+        // docker: 10 * 2.0 = 20
+        // helm: 3 * 3.0 = 9
+        // nginx: 5 * 1.5 = 7.5
+        assert_eq!(terms.len(), 2);
+        assert_eq!(terms[0], "docker");
+        assert_eq!(terms[1], "helm");
+    }
+
+    #[test]
+    fn test_get_top_doc_terms_excludes_query_terms() {
+        // Note: term_frequencies and idf_map use STEMMED keys
+        let mut term_frequencies = HashMap::new();
+        term_frequencies.insert("kubernete".to_string(), 10); // stem of "kubernetes"
+        term_frequencies.insert("dock".to_string(), 5); // stem of "docker"
+        term_frequencies.insert("nginx".to_string(), 3);
+
+        let entry = FileEntry {
+            path: "test.md".to_string(),
+            size_bytes: 100,
+            line_count: 10,
+            headings: vec![],
+            keywords: vec![],
+            body_keywords: vec![
+                "kubernetes".to_string(),
+                "docker".to_string(),
+                "nginx".to_string(),
+            ],
+            links: vec![],
+            simhash: 0,
+            term_frequencies,
+            doc_length: 100,
+            minhash: vec![],
+            section_fingerprints: vec![],
+        };
+
+        let mut idf_map = HashMap::new();
+        idf_map.insert("kubernete".to_string(), 2.0); // stemmed
+        idf_map.insert("dock".to_string(), 1.5); // stemmed
+        idf_map.insert("nginx".to_string(), 3.0);
+
+        // Exclude "kubernetes" from results (different case, should still match after stemming)
+        let exclude = vec!["Kubernetes".to_string()];
+        let terms = get_top_doc_terms(&entry, &idf_map, &exclude, 3);
+
+        assert_eq!(terms.len(), 2);
+        assert!(!terms.contains(&"kubernetes".to_string()));
+        assert_eq!(terms[0], "nginx"); // 3 * 3.0 = 9
+        assert_eq!(terms[1], "docker"); // 5 * 1.5 = 7.5
+    }
+
+    #[test]
+    fn test_get_top_doc_terms_deduplicates_stems() {
+        let mut term_frequencies = HashMap::new();
+        term_frequencies.insert("run".to_string(), 10); // stem of running, runs, run
+
+        let entry = FileEntry {
+            path: "test.md".to_string(),
+            size_bytes: 100,
+            line_count: 10,
+            headings: vec![],
+            keywords: vec![],
+            body_keywords: vec!["running".to_string(), "runs".to_string(), "run".to_string()],
+            links: vec![],
+            simhash: 0,
+            term_frequencies,
+            doc_length: 100,
+            minhash: vec![],
+            section_fingerprints: vec![],
+        };
+
+        let mut idf_map = HashMap::new();
+        idf_map.insert("run".to_string(), 1.0);
+
+        let terms = get_top_doc_terms(&entry, &idf_map, &[], 5);
+
+        // Should only return one term (first occurrence), not all three
+        assert_eq!(terms.len(), 1);
+    }
+
+    #[test]
+    fn test_get_top_doc_terms_zero_returns_empty() {
+        let entry = FileEntry {
+            path: "test.md".to_string(),
+            size_bytes: 100,
+            line_count: 10,
+            headings: vec![],
+            keywords: vec!["test".to_string()],
+            body_keywords: vec!["test".to_string()],
+            links: vec![],
+            simhash: 0,
+            term_frequencies: HashMap::new(),
+            doc_length: 100,
+            minhash: vec![],
+            section_fingerprints: vec![],
+        };
+
+        let idf_map = HashMap::new();
+        let terms = get_top_doc_terms(&entry, &idf_map, &[], 0);
+
+        assert!(terms.is_empty());
+    }
+
+    #[test]
+    fn test_find_link_candidates_single_match() {
+        let mut available = HashSet::new();
+        available.insert("docs/guide/auth.md".to_string());
+        available.insert("docs/guide/other.md".to_string());
+
+        // Source and target are in the same parent; filename matches exactly one file
+        let candidates = find_link_candidates("docs/guide/README.md", "auth.md", &available);
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(candidates[0], "auth.md");
+    }
+
+    #[test]
+    fn test_find_link_candidates_multiple_matches() {
+        let mut available = HashSet::new();
+        available.insert("docs/v1/auth.md".to_string());
+        available.insert("docs/v2/auth.md".to_string());
+        available.insert("docs/archive/auth.md".to_string());
+
+        // Multiple files with same name - should return all
+        let candidates = find_link_candidates("docs/README.md", "auth.md", &available);
+        assert!(candidates.len() >= 2);
+    }
+
+    #[test]
+    fn test_find_link_candidates_no_match() {
+        let mut available = HashSet::new();
+        available.insert("docs/guide/other.md".to_string());
+
+        // No file matches
+        let candidates = find_link_candidates("docs/README.md", "nonexistent.md", &available);
+        assert!(candidates.is_empty());
+    }
+
+    #[test]
+    fn test_link_fix_proposal_serialization() {
+        let proposal = LinkFixProposal {
+            source: "docs/README.md".to_string(),
+            line: 42,
+            broken_target: "../old/auth.md".to_string(),
+            candidates: vec![
+                "../archive/auth.md".to_string(),
+                "../v2/auth.md".to_string(),
+            ],
+            decision: None,
+        };
+
+        let yaml = serde_yaml::to_string(&proposal).unwrap();
+        assert!(yaml.contains("source: docs/README.md"));
+        assert!(yaml.contains("line: 42"));
+        assert!(yaml.contains("broken_target:"));
+        assert!(yaml.contains("candidates:"));
+
+        // Test deserialization
+        let parsed: LinkFixProposal = serde_yaml::from_str(&yaml).unwrap();
+        assert_eq!(parsed.source, "docs/README.md");
+        assert_eq!(parsed.line, 42);
+        assert_eq!(parsed.candidates.len(), 2);
+    }
+
+    #[test]
+    fn test_link_fix_proposal_with_decision() {
+        let yaml = r#"
+source: docs/README.md
+line: 42
+broken_target: "../old/auth.md"
+candidates:
+  - "../archive/auth.md"
+  - "../v2/auth.md"
+decision: 1
+"#;
+        let proposal: LinkFixProposal = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(proposal.decision, Some(1));
+        assert_eq!(proposal.candidates[1], "../v2/auth.md");
+    }
+
+    #[test]
+    fn test_diff_result_serialization() {
+        let result = DiffResult {
+            file1: "docs/a.md".to_string(),
+            file2: "docs/b.md".to_string(),
+            similarity: DiffSimilarity {
+                combined: 0.75,
+                jaccard: 0.6,
+                simhash: 0.9,
+            },
+            shared_keywords: vec!["auth".to_string(), "login".to_string()],
+            only_in_file1: vec!["oauth".to_string()],
+            only_in_file2: vec!["jwt".to_string()],
+            shared_headings: vec!["Introduction".to_string()],
+        };
+
+        let json = serde_json::to_string_pretty(&result).unwrap();
+        assert!(json.contains("\"file1\": \"docs/a.md\""));
+        assert!(json.contains("\"combined\": 0.75"));
+        assert!(json.contains("\"shared_keywords\""));
+    }
+
+    #[test]
+    fn test_stats_result_serialization() {
+        let result = StatsResult {
+            total_files: 100,
+            unique_keywords: 500,
+            total_headings: 250,
+            body_keywords: 1000,
+            total_links: 300,
+            index_version: 3,
+            indexed_at: "2024-01-01T00:00:00Z".to_string(),
+            top_keywords: vec![
+                KeywordCount {
+                    keyword: "authentication".to_string(),
+                    count: 50,
+                },
+                KeywordCount {
+                    keyword: "kubernetes".to_string(),
+                    count: 40,
+                },
+            ],
+        };
+
+        let json = serde_json::to_string_pretty(&result).unwrap();
+        assert!(json.contains("\"total_files\": 100"));
+        assert!(json.contains("\"top_keywords\""));
+        assert!(json.contains("\"authentication\""));
+    }
+
+    #[test]
+    fn test_mv_result_serialization() {
+        let result = MvResult {
+            from: "docs/old.md".to_string(),
+            to: "docs/new.md".to_string(),
+            moved: true,
+            updated_files: vec!["docs/index.md".to_string(), "docs/guide.md".to_string()],
+        };
+
+        let json = serde_json::to_string_pretty(&result).unwrap();
+        assert!(json.contains("\"from\": \"docs/old.md\""));
+        assert!(json.contains("\"moved\": true"));
+        assert!(json.contains("\"updated_files\""));
+    }
+
+    #[test]
+    fn test_fix_references_result_serialization() {
+        let result = FixReferencesResult {
+            mapping_file: "mappings.yaml".to_string(),
+            mappings_count: 5,
+            updated_files: vec!["docs/a.md".to_string()],
+            applied: false,
+        };
+
+        let json = serde_json::to_string_pretty(&result).unwrap();
+        assert!(json.contains("\"mapping_file\": \"mappings.yaml\""));
+        assert!(json.contains("\"mappings_count\": 5"));
+        assert!(json.contains("\"applied\": false"));
+    }
+
+    #[test]
+    fn test_yore_config_basic_parsing() {
+        let toml = r#"
+[index.docs]
+roots = ["docs/"]
+types = ["md"]
+output = ".yore"
+"#;
+        let config: YoreConfig = toml::from_str(toml).unwrap();
+        assert!(config.index.contains_key("docs"));
+        let docs = config.index.get("docs").unwrap();
+        assert_eq!(docs.roots, vec!["docs/"]);
+        assert_eq!(docs.types, vec!["md"]);
+    }
+
+    #[test]
+    fn test_yore_config_link_check_section() {
+        let toml = r#"
+[link-check]
+exclude = ["archive/**", "deprecated/**"]
+
+[[link-check.severity-overrides]]
+pattern = "archive/**"
+severity = "warn"
+
+[[link-check.severity-overrides]]
+pattern = "deprecated/**"
+severity = "info"
+"#;
+        let config: YoreConfig = toml::from_str(toml).unwrap();
+        let link_check = config.link_check.unwrap();
+        assert_eq!(link_check.exclude.len(), 2);
+        assert_eq!(link_check.severity_overrides.len(), 2);
+        assert_eq!(link_check.severity_overrides[0].pattern, "archive/**");
+        assert_eq!(link_check.severity_overrides[0].severity, "warn");
+    }
+
+    #[test]
+    fn test_yore_config_external_repos() {
+        let toml = r#"
+[[external.repos]]
+path = "../runtime/docs"
+prefix = "runtime"
+
+[[external.repos]]
+path = "../api-docs"
+"#;
+        let config: YoreConfig = toml::from_str(toml).unwrap();
+        let external = config.external.unwrap();
+        assert_eq!(external.repos.len(), 2);
+        assert_eq!(external.repos[0].path, "../runtime/docs");
+        assert_eq!(external.repos[0].prefix, Some("runtime".to_string()));
+        assert_eq!(external.repos[1].prefix, None);
+    }
+
+    #[test]
+    fn test_yore_config_policy_section() {
+        let toml = r#"
+[policy]
+rules-file = ".yore-policy.yaml"
+"#;
+        let config: YoreConfig = toml::from_str(toml).unwrap();
+        let policy = config.policy.unwrap();
+        assert_eq!(policy.rules_file, Some(".yore-policy.yaml".to_string()));
+    }
+
+    #[test]
+    fn test_yore_config_full_example() {
+        let toml = r#"
+[index.docs]
+roots = ["docs/"]
+types = ["md", "txt"]
+output = ".yore"
+
+[index.all]
+roots = ["docs/", "specs/"]
+types = ["md"]
+
+[link-check]
+exclude = ["archive/**"]
+
+[[link-check.severity-overrides]]
+pattern = "deprecated/**"
+severity = "info"
+
+[policy]
+rules-file = ".yore-policy.yaml"
+
+[[external.repos]]
+path = "../runtime/docs"
+prefix = "runtime"
+"#;
+        let config: YoreConfig = toml::from_str(toml).unwrap();
+
+        // Index profiles
+        assert_eq!(config.index.len(), 2);
+        assert!(config.index.contains_key("docs"));
+        assert!(config.index.contains_key("all"));
+
+        // Link check
+        let link_check = config.link_check.unwrap();
+        assert_eq!(link_check.exclude.len(), 1);
+        assert_eq!(link_check.severity_overrides.len(), 1);
+
+        // Policy
+        let policy = config.policy.unwrap();
+        assert!(policy.rules_file.is_some());
+
+        // External
+        let external = config.external.unwrap();
+        assert_eq!(external.repos.len(), 1);
+    }
+
+    #[test]
+    fn test_yore_config_empty_is_valid() {
+        let toml = "";
+        let config: YoreConfig = toml::from_str(toml).unwrap();
+        assert!(config.index.is_empty());
+        assert!(config.link_check.is_none());
+        assert!(config.policy.is_none());
+        assert!(config.external.is_none());
+    }
+
+    #[test]
+    fn test_build_result_serialization() {
+        let result = BuildResult {
+            index_path: ".yore".to_string(),
+            files_indexed: 150,
+            total_headings: 450,
+            total_links: 200,
+            unique_keywords: 800,
+            duration_ms: 1234,
+            renames_tracked: None,
+        };
+
+        let json = serde_json::to_string_pretty(&result).unwrap();
+        assert!(json.contains("\"index_path\": \".yore\""));
+        // renames_tracked should be absent when None due to skip_serializing_if
+        assert!(!json.contains("renames_tracked"));
+        assert!(json.contains("\"files_indexed\": 150"));
+        assert!(json.contains("\"total_headings\": 450"));
+        assert!(json.contains("\"total_links\": 200"));
+        assert!(json.contains("\"unique_keywords\": 800"));
+        assert!(json.contains("\"duration_ms\": 1234"));
+    }
+
+    #[test]
+    fn test_eval_json_result_serialization() {
+        let result = EvalJsonResult {
+            questions_file: "questions.jsonl".to_string(),
+            total_questions: 10,
+            passed: 8,
+            failed: 2,
+            pass_rate: 80.0,
+            results: vec![
+                EvalQuestionResult {
+                    question: "How do I authenticate?".to_string(),
+                    passed: true,
+                    expected: vec!["auth.md".to_string()],
+                    found: vec!["auth.md".to_string()],
+                    missing: vec![],
+                },
+                EvalQuestionResult {
+                    question: "What is the API endpoint?".to_string(),
+                    passed: false,
+                    expected: vec!["api.md".to_string()],
+                    found: vec![],
+                    missing: vec!["api.md".to_string()],
+                },
+            ],
+        };
+
+        let json = serde_json::to_string_pretty(&result).unwrap();
+        assert!(json.contains("\"questions_file\": \"questions.jsonl\""));
+        assert!(json.contains("\"total_questions\": 10"));
+        assert!(json.contains("\"passed\": 8"));
+        assert!(json.contains("\"failed\": 2"));
+        assert!(json.contains("\"pass_rate\": 80.0"));
+        assert!(json.contains("\"results\""));
+        assert!(json.contains("How do I authenticate?"));
+        assert!(json.contains("\"missing\": []"));
+    }
+
+    #[test]
+    fn test_rename_history_serialization() {
+        let history = RenameHistory {
+            renames: vec![
+                RenameEntry {
+                    old_path: "docs/old/auth.md".to_string(),
+                    new_path: "docs/v2/auth.md".to_string(),
+                    commit: "abc123".to_string(),
+                },
+                RenameEntry {
+                    old_path: "docs/v2/auth.md".to_string(),
+                    new_path: "docs/current/auth.md".to_string(),
+                    commit: "def456".to_string(),
+                },
+            ],
+            indexed_at: "1234567890".to_string(),
+        };
+
+        let json = serde_json::to_string_pretty(&history).unwrap();
+        assert!(json.contains("\"old_path\": \"docs/old/auth.md\""));
+        assert!(json.contains("\"new_path\": \"docs/v2/auth.md\""));
+        assert!(json.contains("\"commit\": \"abc123\""));
+
+        // Verify roundtrip
+        let parsed: RenameHistory = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.renames.len(), 2);
+    }
+
+    #[test]
+    fn test_resolve_renamed_path_single_rename() {
+        let history = RenameHistory {
+            renames: vec![RenameEntry {
+                old_path: "docs/old.md".to_string(),
+                new_path: "docs/new.md".to_string(),
+                commit: "abc123".to_string(),
+            }],
+            indexed_at: "0".to_string(),
+        };
+
+        assert_eq!(
+            resolve_renamed_path("docs/old.md", &history),
+            Some("docs/new.md".to_string())
+        );
+        assert_eq!(resolve_renamed_path("docs/other.md", &history), None);
+    }
+
+    #[test]
+    fn test_resolve_renamed_path_chain() {
+        let history = RenameHistory {
+            renames: vec![
+                RenameEntry {
+                    old_path: "a.md".to_string(),
+                    new_path: "b.md".to_string(),
+                    commit: "1".to_string(),
+                },
+                RenameEntry {
+                    old_path: "b.md".to_string(),
+                    new_path: "c.md".to_string(),
+                    commit: "2".to_string(),
+                },
+                RenameEntry {
+                    old_path: "c.md".to_string(),
+                    new_path: "d.md".to_string(),
+                    commit: "3".to_string(),
+                },
+            ],
+            indexed_at: "0".to_string(),
+        };
+
+        // Should follow the chain from a.md -> b.md -> c.md -> d.md
+        assert_eq!(
+            resolve_renamed_path("a.md", &history),
+            Some("d.md".to_string())
+        );
+        // Starting from middle should also work
+        assert_eq!(
+            resolve_renamed_path("b.md", &history),
+            Some("d.md".to_string())
+        );
+    }
+
+    #[test]
+    fn test_compute_relative_path_same_dir() {
+        let files: HashSet<String> = HashSet::new();
+        assert_eq!(
+            compute_relative_path("docs/foo.md", "docs/bar.md", &files),
+            Some("bar.md".to_string())
+        );
+    }
+
+    #[test]
+    fn test_compute_relative_path_subdirectory() {
+        let files: HashSet<String> = HashSet::new();
+        assert_eq!(
+            compute_relative_path("docs/index.md", "docs/guides/auth.md", &files),
+            Some("guides/auth.md".to_string())
+        );
+    }
+
+    #[test]
+    fn test_compute_relative_path_parent_directory() {
+        let files: HashSet<String> = HashSet::new();
+        let result = compute_relative_path("docs/guides/auth.md", "docs/index.md", &files);
+        assert!(result.is_some());
+        assert!(result.unwrap().starts_with("../"));
+    }
+
+    #[test]
+    fn test_build_result_with_renames() {
+        let result = BuildResult {
+            index_path: ".yore".to_string(),
+            files_indexed: 100,
+            total_headings: 200,
+            total_links: 50,
+            unique_keywords: 500,
+            duration_ms: 1000,
+            renames_tracked: Some(25),
+        };
+
+        let json = serde_json::to_string_pretty(&result).unwrap();
+        assert!(json.contains("\"renames_tracked\": 25"));
+    }
+
+    #[test]
+    fn test_external_repos_path_extraction() {
+        let toml = r#"
+[[external.repos]]
+path = "../runtime/docs"
+prefix = "runtime"
+
+[[external.repos]]
+path = "../api-docs"
+"#;
+        let config: YoreConfig = toml::from_str(toml).unwrap();
+        let external = config.external.unwrap();
+
+        // Extract paths like the cmd_check_links dispatch does
+        let paths: Vec<String> = external.repos.iter().map(|r| r.path.clone()).collect();
+
+        assert_eq!(paths.len(), 2);
+        assert_eq!(paths[0], "../runtime/docs");
+        assert_eq!(paths[1], "../api-docs");
     }
 }

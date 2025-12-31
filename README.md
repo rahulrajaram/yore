@@ -124,14 +124,21 @@ All operations are deterministic: given the same index and configuration, yore w
 
 ## 5. Installation
 
-Install yore into `~/.local/bin`:
+### From crates.io (recommended)
 
 ```bash
-cd tools/yore
-./install.sh
-````
+cargo install yore-cli
+```
 
-Verify the installation:
+### From source
+
+```bash
+git clone https://github.com/rahulrajaram/yore.git
+cd yore
+cargo install --path .
+```
+
+### Verify installation
 
 ```bash
 yore --version

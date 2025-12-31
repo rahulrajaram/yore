@@ -1,11 +1,17 @@
 [package]
-name = "yore"
-version = "0.2.0"
+name = "yore-cli"
+version = "0.3.0"
 edition = "2021"
 description = "Fast document indexer for finding duplicates and searching content"
 license = "MIT"
 keywords = ["documentation", "index", "search", "duplicates"]
 categories = ["command-line-utilities", "text-processing"]
+repository = "https://github.com/rahulrajaram/yore"
+readme = "README.md"
+
+[[bin]]
+name = "yore"
+path = "src/main.rs"
 
 [dependencies]
 clap = { version = "4", features = ["derive"] }
