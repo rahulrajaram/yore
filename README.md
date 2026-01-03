@@ -104,7 +104,7 @@ Yore operates in four main phases:
    - Basic metadata (path, size, timestamps)
 
 2. **Retrieval and analysis**
-   Commands such as `yore query`, `yore dupes`, `yore dupes-sections`, `yore canonicality`, `yore check-links`, `yore backlinks`, and `yore orphans` operate against this index to answer questions about relevance, duplication, authority, and link structure.
+   Commands such as `yore query`, `yore dupes`, `yore dupes-sections`, `yore canonicality`, `yore canonical-orphans`, `yore check-links`, `yore backlinks`, and `yore orphans` operate against this index to answer questions about relevance, duplication, authority, and link structure.
 
 3. **Context assembly for LLMs**
    The `yore assemble` command runs a multi‑stage pipeline:
@@ -299,6 +299,10 @@ The similarity score is a combined metric using Jaccard overlap, SimHash, and Mi
 yore dupes --threshold 0.4 --group --json --index docs/.index
 ```
 
+Tip: If the duplication is embedded in a section of a larger file, use
+`yore dupes-sections` and then `yore diff` to confirm overlap. Use `--json`
+output when wiring into automation.
+
 ---
 
 ### 7.4 `yore dupes-sections`
@@ -321,6 +325,9 @@ yore dupes-sections --index <index-dir>
 # Find sections appearing in 5+ files with ≥ 85% similarity
 yore dupes-sections --threshold 0.85 --min-files 5 --json --index docs/.index
 ```
+
+Tip: For partial copy/paste blocks, lower `--threshold` and inspect
+candidate pairs with `yore diff`.
 
 ---
 
@@ -411,6 +418,24 @@ yore check --links --taxonomy --policy .yore-policy.yaml \
   --index docs/.index \
   --ci --fail-on doc_missing,policy_error
 ```
+
+**Policy example**
+
+```yaml
+rules:
+  - name: "STATUS docs are summaries"
+    pattern: "**/IMPLEMENTATION_STATUS.md"
+    max_length: 400
+    max_section_length: 50
+    section_heading_regex: "(?i)async"
+    must_link_to:
+      - "docs/ASYNC_MIGRATION_COMPLETE_SUMMARY.md"
+```
+
+`max_section_length` applies to sections whose heading matches
+`section_heading_regex`. `must_link_to` checks internal markdown links;
+paths with `/` are treated as repo-root relative, and `./`/`../` paths are
+resolved relative to the file.
 
 ---
 
@@ -618,7 +643,28 @@ yore canonicality --index docs/.index --threshold 0.7
 
 ---
 
-### 7.16 `yore export-graph`
+### 7.16 `yore canonical-orphans`
+
+Reports canonical documents with zero inbound links.
+
+```bash
+yore canonical-orphans --index <index-dir> --threshold <0.0-1.0>
+```
+
+**Key options**
+
+* `--json` – Emit JSON output
+* `--threshold, -t` – Minimum canonicality score (0.0-1.0, default: 0.7)
+
+**Example**
+
+```bash
+yore canonical-orphans --index docs/.index --threshold 0.7
+```
+
+---
+
+### 7.17 `yore export-graph`
 
 Exports the documentation link graph as JSON or Graphviz DOT.
 
@@ -638,7 +684,7 @@ yore export-graph --index docs/.index --format dot > graph.dot
 
 ---
 
-### 7.17 `yore suggest-consolidation`
+### 7.18 `yore suggest-consolidation`
 
 Suggests consolidation candidates based on duplicate detection and canonicality scoring.
 

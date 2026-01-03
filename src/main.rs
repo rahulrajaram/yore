@@ -22,7 +22,7 @@ use std::time::Instant;
 /// Typical workflow:
 ///   1. Build an index over your docs with `yore build`.
 ///   2. Inspect and clean the docs with `query`, `dupes*`, `check-links`,
-///      `backlinks`, `orphans`, and `canonicality`.
+///      `backlinks`, `orphans`, `canonicality`, and `canonical-orphans`.
 ///   3. Assemble an answer‑ready context for an LLM with `yore assemble`.
 ///
 /// All commands are deterministic and operate over the on‑disk index in
@@ -43,7 +43,7 @@ and then assembles minimal, high-signal context for a given question.
 Typical workflow:
   1. Build an index over your docs with `yore build`.
   2. Inspect and clean the docs using `query`, `dupes*`, `check-links`,
-     `backlinks`, `orphans`, and `canonicality`.
+     `backlinks`, `orphans`, `canonicality`, and `canonical-orphans`.
   3. Assemble an answer-ready context for an LLM with `yore assemble`.
 
 All commands operate deterministically over the on-disk index in `--index`
@@ -70,6 +70,7 @@ All commands operate deterministically over the on-disk index in `--index`
     yore backlinks docs/architecture/DEPLOYMENT-GUIDE.md --index .yore
     yore orphans --index .yore --exclude README
     yore canonicality --index .yore --threshold 0.7
+    yore canonical-orphans --index .yore --threshold 0.7
 
 OUTPUT FORMATS
 
@@ -77,7 +78,7 @@ OUTPUT FORMATS
   CI pipelines and automation agents. Commands with JSON support:
 
     build, eval, query, similar, dupes, dupes-sections, check-links,
-    fix-links, backlinks, orphans, canonicality, stale,
+    fix-links, backlinks, orphans, canonicality, canonical-orphans, stale,
     suggest-consolidation, policy, diff, stats, mv, fix-references
 
   Example: yore check-links --index .yore --json | jq '.broken[]'"#
@@ -116,6 +117,19 @@ enum Commands {
     ///
     ///   # Run links + staleness + taxonomy in one shot
     ///   yore check --links --stale --taxonomy --policy taxonomy.yaml
+    /// Run multiple checks in one pass (links, policy, stale).
+    ///
+    /// Designed for CI and automation; always emits JSON output.
+    ///
+    /// Limitations:
+    ///   - `--dupes` is accepted but not currently executed.
+    ///   - `--stale-days` is accepted but stale checks still use 90 days.
+    ///
+    /// Related:
+    ///   - `yore check-links`, `yore policy`, `yore stale`
+    ///
+    /// Example:
+    ///   yore check --links --taxonomy --policy .yore-policy.yaml --index .yore --ci
     Check {
         /// Run link validation (same engine as `check-links`)
         #[arg(long)]
@@ -162,8 +176,17 @@ enum Commands {
     /// call other commands (`query`, `assemble`, `dupes*`, etc.) against
     /// the resulting index.
     ///
-    /// Example:
+    /// Limitations:
+    ///   - Only indexes the extensions listed in `--types`.
+    ///   - Ignores binary files and content outside the selected roots.
+    ///   - `--track-renames` requires a git repo with history.
+    ///
+    /// Related:
+    ///   - `yore stats`, `yore query`, `yore assemble`
+    ///
+    /// Examples:
     ///   yore build docs --output .yore --types md,txt --json
+    ///   yore build . --output .yore --exclude node_modules --exclude target
     Build {
         /// Path to index
         #[arg(default_value = ".")]
@@ -198,8 +221,16 @@ enum Commands {
     /// Useful for quick inspection by humans and for agents that want to
     /// select candidate files before assembling full context.
     ///
-    /// Example:
+    /// Limitations:
+    ///   - Only searches indexed files; run `yore build` first.
+    ///   - Ranking is term-based, not semantic.
+    ///
+    /// Related:
+    ///   - `yore assemble`, `yore similar`, `yore stats`
+    ///
+    /// Examples:
     ///   yore query kubernetes deployment --index .yore --limit 5
+    ///   yore query "async migration" --index .yore --files-only
     Query {
         /// Search terms
         terms: Vec<String>,
@@ -233,8 +264,16 @@ enum Commands {
     /// Useful for de-duplicating design docs, spotting outdated copies,
     /// or finding related ADRs and guides.
     ///
-    /// Example:
+    /// Limitations:
+    ///   - The reference file must be in the index.
+    ///   - Similarity is heuristic, not semantic.
+    ///
+    /// Related:
+    ///   - `yore dupes`, `yore diff`, `yore query`
+    ///
+    /// Examples:
     ///   yore similar docs/adr/ADR-0013-retries.md --index .yore --limit 5
+    ///   yore similar docs/architecture/AUTH.md --threshold 0.4 --json
     Similar {
         /// Reference file
         file: PathBuf,
@@ -268,8 +307,16 @@ enum Commands {
     /// Useful for documentation cleanup and for agents choosing which
     /// version of a document to treat as canonical.
     ///
-    /// Example:
+    /// Limitations:
+    ///   - Similarity is heuristic and may miss paraphrases.
+    ///   - Tune `--threshold` for larger or smaller corpora.
+    ///
+    /// Related:
+    ///   - `yore dupes-sections`, `yore diff`, `yore suggest-consolidation`
+    ///
+    /// Examples:
     ///   yore dupes --index .yore --threshold 0.35 --group
+    ///   yore dupes --index .yore --threshold 0.5 --json
     Dupes {
         /// Similarity threshold (0.0 to 1.0)
         #[arg(short, long, default_value = "0.35")]
@@ -297,8 +344,16 @@ enum Commands {
     /// Helpful for detecting repeated how-to blocks, copy-pasted API
     /// descriptions, or repeated ADR fragments.
     ///
-    /// Example:
+    /// Limitations:
+    ///   - Section similarity uses SimHash; reworded sections may be missed.
+    ///   - Smaller sections may require a lower `--threshold`.
+    ///
+    /// Related:
+    ///   - `yore dupes`, `yore diff`, `yore suggest-consolidation`
+    ///
+    /// Examples:
     ///   yore dupes-sections --index .yore --threshold 0.7 --min-files 2
+    ///   yore dupes-sections --index .yore --threshold 0.85 --min-files 5 --json
     DupesSections {
         /// Similarity threshold (0.0 to 1.0)
         #[arg(short, long, default_value = "0.7")]
@@ -322,8 +377,16 @@ enum Commands {
     /// Compares two files using the index and reports what content they
     /// share, helping you understand drift or duplication between them.
     ///
-    /// Example:
+    /// Limitations:
+    ///   - Not a line-by-line diff; uses indexed keywords/headings.
+    ///   - Both files must be indexed.
+    ///
+    /// Related:
+    ///   - `yore dupes`, `yore dupes-sections`, `yore similar`
+    ///
+    /// Examples:
     ///   yore diff docs/old.md docs/new.md --index .yore --json
+    ///   yore diff docs/plan.md docs/status.md --index .yore
     Diff {
         /// First file
         file1: PathBuf,
@@ -345,8 +408,15 @@ enum Commands {
     /// Prints counts of files, headings, links, and top keywords, which
     /// is useful for sanity-checking an index and monitoring drift over time.
     ///
-    /// Example:
+    /// Limitations:
+    ///   - Reports only what is in the index, not the live filesystem.
+    ///
+    /// Related:
+    ///   - `yore build`, `yore query`
+    ///
+    /// Examples:
     ///   yore stats --index .yore --top-keywords 20 --json
+    ///   yore stats --index docs/.index --top-keywords 50
     Stats {
         /// Show top N keywords
         #[arg(long, default_value = "20")]
@@ -366,7 +436,13 @@ enum Commands {
     /// Starts a simple read-eval-print loop where you can type queries
     /// and inspect results quickly while iterating on documentation.
     ///
-    /// Example:
+    /// Limitations:
+    ///   - No persistence or scripting; use `yore query` for batch runs.
+    ///
+    /// Related:
+    ///   - `yore query`, `yore stats`
+    ///
+    /// Examples:
     ///   yore repl --index .yore
     Repl {
         /// Index directory
@@ -383,9 +459,17 @@ enum Commands {
     /// This is the primary entry point for agents and tools that want a
     /// deterministic, reproducible context to send to an LLM.
     ///
-    /// Example:
+    /// Limitations:
+    ///   - Uses indexed content only; run `yore build` first.
+    ///   - Cross-reference expansion follows internal links only.
+    ///
+    /// Related:
+    ///   - `yore query`, `yore eval`, `yore build`
+    ///
+    /// Examples:
     ///   yore assemble "How does authentication work?" \
     ///     --index .yore --max-tokens 8000 --depth 1 > context.md
+    ///   yore assemble "async migration status" --index .yore --max-sections 10
     Assemble {
         /// Natural language query/question
         query: Vec<String>,
@@ -424,8 +508,16 @@ enum Commands {
     /// Useful for regression testing and measuring improvements to docs
     /// or index configuration.
     ///
-    /// Example:
+    /// Limitations:
+    ///   - Uses substring matching; does not grade semantic answers.
+    ///   - False positives/negatives are possible; tune expectations.
+    ///
+    /// Related:
+    ///   - `yore assemble`, `yore query`
+    ///
+    /// Examples:
     ///   yore eval --questions questions.jsonl --index .yore --json
+    ///   yore eval --questions questions.jsonl --index .yore
     Eval {
         /// Path to questions JSONL file
         #[arg(short, long, default_value = "questions.jsonl")]
@@ -448,6 +540,13 @@ enum Commands {
     /// Can emit JSON for automated checks in CI or for agents that want to
     /// repair links automatically, including a grouped summary by file and
     /// by issue kind (doc_missing, code_missing, placeholder, etc.).
+    ///
+    /// Limitations:
+    ///   - Does not fetch external URLs; external links are not validated.
+    ///   - Only checks files within the index roots.
+    ///
+    /// Related:
+    ///   - `yore fix-links`, `yore export-graph`, `yore backlinks`
     ///
     /// Examples:
     ///   # Basic JSON output over default index
@@ -485,8 +584,15 @@ enum Commands {
     /// Useful for understanding impact of changes, cleaning up docs, and
     /// deciding whether a document is safe to delete.
     ///
-    /// Example:
+    /// Limitations:
+    ///   - Only considers indexed markdown links (not external URLs).
+    ///
+    /// Related:
+    ///   - `yore orphans`, `yore export-graph`
+    ///
+    /// Examples:
     ///   yore backlinks docs/architecture/DEPLOYMENT-GUIDE.md --index .yore
+    ///   yore backlinks docs/README.md --index .yore --json
     Backlinks {
         /// File to find backlinks for
         file: String,
@@ -508,8 +614,16 @@ enum Commands {
     /// Helpful for identifying dead, experimental, or forgotten documents
     /// that may be candidates for deletion or consolidation.
     ///
-    /// Example:
+    /// Limitations:
+    ///   - Entry-point docs (README/INDEX) may be intentionally orphaned.
+    ///   - Only considers links in the index.
+    ///
+    /// Related:
+    ///   - `yore backlinks`, `yore canonical-orphans`
+    ///
+    /// Examples:
     ///   yore orphans --index .yore --exclude README
+    ///   yore orphans --index .yore --exclude README --exclude INDEX --json
     Orphans {
         /// Index directory
         #[arg(short, long, default_value = ".yore")]
@@ -530,8 +644,15 @@ enum Commands {
     /// path, and link structure so agents can consistently pick canonical
     /// sources of truth when multiple documents overlap.
     ///
-    /// Example:
+    /// Limitations:
+    ///   - Heuristic scoring; validate with `dupes` and human review.
+    ///
+    /// Related:
+    ///   - `yore suggest-consolidation`, `yore canonical-orphans`
+    ///
+    /// Examples:
     ///   yore canonicality --index .yore --threshold 0.7
+    ///   yore canonicality --index .yore --json
     Canonicality {
         /// Index directory
         #[arg(short, long, default_value = ".yore")]
@@ -546,6 +667,35 @@ enum Commands {
         threshold: f64,
     },
 
+    /// Find canonical documents with no inbound links.
+    ///
+    /// Filters documents by canonicality score and reports those that are
+    /// not linked to by any other indexed document.
+    ///
+    /// Limitations:
+    ///   - Only considers inbound links in the index roots.
+    ///   - Canonicality is heuristic, not semantic.
+    ///
+    /// Related:
+    ///   - `yore canonicality`, `yore orphans`, `yore backlinks`
+    ///
+    /// Examples:
+    ///   yore canonical-orphans --index .yore --threshold 0.7
+    ///   yore canonical-orphans --index .yore --threshold 0.8 --json
+    CanonicalOrphans {
+        /// Index directory
+        #[arg(short, long, default_value = ".yore")]
+        index: PathBuf,
+
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+
+        /// Minimum canonicality score (0.0 to 1.0)
+        #[arg(short, long, default_value = "0.7")]
+        threshold: f64,
+    },
+
     /// Automatically fix a subset of broken relative links.
     ///
     /// This command uses heuristics over the index to propose safe,
@@ -554,6 +704,13 @@ enum Commands {
     ///
     /// For agent-friendly operation, use --propose to output ambiguous
     /// cases to a YAML file, then --apply-decisions to apply choices.
+    ///
+    /// Limitations:
+    ///   - Only fixes a conservative subset of relative links.
+    ///   - Ambiguous targets require `--propose` + `--apply-decisions`.
+    ///
+    /// Related:
+    ///   - `yore check-links`, `yore mv`, `yore fix-references`
     ///
     /// Examples:
     ///   yore fix-links --index .yore --dry-run
@@ -595,8 +752,16 @@ enum Commands {
     /// This promotes the `mv --update-refs` machinery into a more general
     /// bulk rewrite tool, suitable for large documentation reorganizations.
     ///
-    /// Example:
+    /// Limitations:
+    ///   - Does not move files; only rewrites references.
+    ///   - Requires a mapping file that lists exact from/to pairs.
+    ///
+    /// Related:
+    ///   - `yore mv`, `yore fix-links`
+    ///
+    /// Examples:
     ///   yore fix-references --mapping mappings.yaml --index .yore --dry-run --json
+    ///   yore fix-references --mapping mappings.yaml --index .yore --apply
     FixReferences {
         /// Path to reference mapping configuration (YAML)
         #[arg(short, long)]
@@ -624,6 +789,13 @@ enum Commands {
     /// This is a thin, ergonomic wrapper around link rewrite logic. When
     /// --update-refs is used, all Markdown links that point to the old
     /// path are rewritten to point to the new path.
+    ///
+    /// Limitations:
+    ///   - Only updates links in indexed files; run `yore build` first.
+    ///   - Does not update external repositories or URLs.
+    ///
+    /// Related:
+    ///   - `yore fix-references`, `yore fix-links`, `yore check-links`
     ///
     /// Examples:
     ///   yore mv docs/old/auth.md docs/architecture/AUTH.md --update-refs --index .yore --json
@@ -657,8 +829,16 @@ enum Commands {
     /// Uses file modification time and inbound link counts from the index
     /// to highlight documents that may be unmaintained or dead.
     ///
-    /// Example:
+    /// Limitations:
+    ///   - Staleness is heuristic; validate before deleting.
+    ///   - Depends on file mtime and inbound links only.
+    ///
+    /// Related:
+    ///   - `yore orphans`, `yore canonicality`
+    ///
+    /// Examples:
     ///   yore stale --index .yore --days 90 --min-inlinks 0 --json
+    ///   yore stale --index .yore --days 30 --min-inlinks 1
     Stale {
         /// Index directory
         #[arg(short, long, default_value = ".yore")]
@@ -682,7 +862,13 @@ enum Commands {
     /// Emits either a JSON representation or a Graphviz DOT file
     /// describing links between indexed documents.
     ///
-    /// Example:
+    /// Limitations:
+    ///   - Graph only includes indexed documents and internal links.
+    ///
+    /// Related:
+    ///   - `yore backlinks`, `yore check-links`
+    ///
+    /// Examples:
     ///   yore export-graph --format json --index .yore
     ///   yore export-graph --format dot --index .yore > graph.dot
     ExportGraph {
@@ -700,8 +886,15 @@ enum Commands {
     /// Uses duplicate detection and canonicality scoring to propose a
     /// canonical document and a set of files that should be merged into it.
     ///
-    /// Example:
+    /// Limitations:
+    ///   - Suggestions are heuristic; review before merging or deleting.
+    ///
+    /// Related:
+    ///   - `yore dupes`, `yore canonicality`, `yore diff`
+    ///
+    /// Examples:
     ///   yore suggest-consolidation --threshold 0.7 --json --index .yore
+    ///   yore suggest-consolidation --threshold 0.6 --index .yore
     SuggestConsolidation {
         /// Minimum duplicate similarity threshold (0.0 to 1.0)
         #[arg(long, default_value = "0.7")]
@@ -719,10 +912,22 @@ enum Commands {
     /// Check documentation against declarative policy rules.
     ///
     /// Reads a YAML policy file describing path patterns and required or
-    /// forbidden content, and reports any violations it finds.
+    /// forbidden content, and reports any violations it finds. Rules can
+    /// also enforce maximum section length (optionally filtered by heading
+    /// regex) and required markdown links.
+    /// Required links treat absolute paths as repo-root relative, and
+    /// resolve relative paths against the source file.
     ///
-    /// Example:
+    /// Limitations:
+    ///   - Rules operate on indexed content; run `yore build` first.
+    ///   - Content checks are literal substring matches.
+    ///
+    /// Related:
+    ///   - `yore check --taxonomy`, `yore check-links`
+    ///
+    /// Examples:
     ///   yore policy --config .yore-policy.yaml --index .yore --json
+    ///   yore policy --config .yore-policy.yaml --index .yore
     Policy {
         /// Path to policy configuration (YAML)
         #[arg(long, default_value = ".yore-policy.yaml")]
@@ -924,12 +1129,21 @@ struct PolicyRule {
     /// Optional maximum document length in lines
     #[serde(default)]
     max_length: Option<usize>,
+    /// Optional maximum section length in lines
+    #[serde(default)]
+    max_section_length: Option<usize>,
+    /// Optional regex to scope section-length rules to matching headings
+    #[serde(default)]
+    section_heading_regex: Option<String>,
     /// Required markdown headings (by text, without leading '#')
     #[serde(default)]
     required_headings: Vec<String>,
     /// Forbidden markdown headings (by text, without leading '#')
     #[serde(default)]
     forbidden_headings: Vec<String>,
+    /// Required markdown link targets (resolved relative to file)
+    #[serde(default)]
+    must_link_to: Vec<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1078,6 +1292,20 @@ struct OrphanFile {
 struct OrphansResult {
     total_orphans: usize,
     orphans: Vec<OrphanFile>,
+}
+
+#[derive(Serialize, Debug, Clone)]
+struct CanonicalOrphan {
+    file: String,
+    canonicality: f64,
+    inbound_links: usize,
+}
+
+#[derive(Serialize, Debug)]
+struct CanonicalOrphansResult {
+    total_orphans: usize,
+    threshold: f64,
+    orphans: Vec<CanonicalOrphan>,
 }
 
 // Canonicality structures
@@ -1598,6 +1826,11 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             json,
             threshold,
         } => cmd_canonicality(&index, json, threshold),
+        Commands::CanonicalOrphans {
+            index,
+            json,
+            threshold,
+        } => cmd_canonical_orphans(&index, threshold, json),
         Commands::ExportGraph { format, index } => cmd_export_graph(&index, &format),
         Commands::SuggestConsolidation {
             threshold,
@@ -5500,6 +5733,161 @@ fn rule_name(rule: &PolicyRule) -> String {
     rule.name.clone().unwrap_or_else(|| rule.pattern.clone())
 }
 
+#[derive(Debug)]
+struct PolicySection {
+    heading: String,
+    line_start: usize,
+    line_end: usize,
+}
+
+fn parse_policy_sections(content: &str) -> Vec<PolicySection> {
+    let lines: Vec<&str> = content.lines().collect();
+    if lines.is_empty() {
+        return Vec::new();
+    }
+
+    let heading_re = Regex::new(r"^(#{1,6})\s+(.+)$").unwrap();
+    let mut sections: Vec<PolicySection> = Vec::new();
+    let mut current: Option<PolicySection> = None;
+
+    for (idx, line) in lines.iter().enumerate() {
+        if let Some(caps) = heading_re.captures(line) {
+            let heading = caps
+                .get(2)
+                .map(|m| m.as_str().trim().to_string())
+                .unwrap_or_else(|| "Untitled".to_string());
+
+            if let Some(mut prev) = current.take() {
+                if idx > 0 {
+                    prev.line_end = idx;
+                }
+                sections.push(prev);
+            }
+
+            current = Some(PolicySection {
+                heading,
+                line_start: idx + 1,
+                line_end: lines.len(),
+            });
+        }
+    }
+
+    if let Some(mut last) = current {
+        last.line_end = lines.len();
+        sections.push(last);
+    }
+
+    if sections.is_empty() {
+        sections.push(PolicySection {
+            heading: "Full Document".to_string(),
+            line_start: 1,
+            line_end: lines.len(),
+        });
+    }
+
+    sections
+}
+
+#[derive(Debug)]
+struct LinkTarget {
+    path: String,
+    anchor: Option<String>,
+}
+
+fn extract_markdown_link_targets(file_path: &str, content: &str) -> Vec<LinkTarget> {
+    let mut targets = Vec::new();
+    let link_regex = Regex::new(r"(!?)\[(?P<label>[^\]]+)\]\((?P<target>[^)]+)\)").unwrap();
+
+    let origin_dir = Path::new(file_path).parent().unwrap_or_else(|| Path::new("."));
+
+    for caps in link_regex.captures_iter(content) {
+        if caps.get(1).is_some_and(|m| m.as_str() == "!") {
+            continue;
+        }
+
+        let target_str = match caps.name("target") {
+            Some(t) => t.as_str(),
+            None => continue,
+        };
+
+        if target_str.starts_with("http://")
+            || target_str.starts_with("https://")
+            || target_str.starts_with("mailto:")
+            || target_str.starts_with("ftp://")
+        {
+            continue;
+        }
+
+        let (path_part, anchor) = if let Some(hash_pos) = target_str.find('#') {
+            (
+                &target_str[..hash_pos],
+                Some(target_str[hash_pos + 1..].to_string()),
+            )
+        } else {
+            (target_str, None)
+        };
+
+        if path_part.is_empty() {
+            continue;
+        }
+
+        if !path_part.ends_with(".md")
+            && !path_part.ends_with(".txt")
+            && !path_part.ends_with(".rst")
+        {
+            continue;
+        }
+
+        let target_path = if let Some(stripped) = path_part.strip_prefix('/') {
+            PathBuf::from(stripped)
+        } else {
+            origin_dir.join(path_part)
+        };
+
+        let normalized = normalize_path(&target_path);
+        targets.push(LinkTarget {
+            path: normalized,
+            anchor,
+        });
+    }
+
+    targets
+}
+
+fn normalize_required_link(file_path: &str, required: &str) -> (String, Option<String>) {
+    let (path_part, anchor) = if let Some(hash_pos) = required.find('#') {
+        (
+            &required[..hash_pos],
+            Some(required[hash_pos + 1..].to_string()),
+        )
+    } else {
+        (required, None)
+    };
+
+    if path_part.starts_with("http://")
+        || path_part.starts_with("https://")
+        || path_part.starts_with("mailto:")
+        || path_part.starts_with("ftp://")
+    {
+        return (required.to_string(), anchor);
+    }
+
+    let path_part = path_part.trim_start_matches("./");
+    let resolved = if path_part.is_empty() {
+        PathBuf::from(file_path)
+    } else if path_part.starts_with("../") {
+        let origin_dir = Path::new(file_path).parent().unwrap_or_else(|| Path::new("."));
+        origin_dir.join(path_part)
+    } else if path_part.starts_with('/') || path_part.contains('/') {
+        PathBuf::from(path_part.trim_start_matches('/'))
+    } else {
+        let origin_dir = Path::new(file_path).parent().unwrap_or_else(|| Path::new("."));
+        origin_dir.join(path_part)
+    };
+
+    (normalize_path(&resolved), anchor)
+}
+
 fn collect_policy_violations_for_content(
     rule: &PolicyRule,
     file_path: &str,
@@ -5598,6 +5986,88 @@ fn collect_policy_violations_for_content(
                     file: file_path.to_string(),
                     rule: rule_name(rule),
                     message: format!("Forbidden heading present: {:?}", h),
+                    severity: rule_severity(rule),
+                    kind: "policy_violation".to_string(),
+                });
+            }
+        }
+    }
+
+    // Section length checks (line count)
+    if let Some(max_section_len) = rule.max_section_length {
+        let heading_filter = match rule.section_heading_regex.as_deref() {
+            Some(pattern) => match Regex::new(pattern) {
+                Ok(re) => Some(re),
+                Err(_) => {
+                    violations.push(PolicyViolation {
+                        file: file_path.to_string(),
+                        rule: rule_name(rule),
+                        message: format!("Invalid section heading regex: {:?}", pattern),
+                        severity: rule_severity(rule),
+                        kind: "policy_violation".to_string(),
+                    });
+                    return violations;
+                }
+            },
+            None => None,
+        };
+
+        for section in parse_policy_sections(content) {
+            if let Some(ref re) = heading_filter {
+                if !re.is_match(&section.heading) {
+                    continue;
+                }
+            }
+
+            let section_len = if section.line_end >= section.line_start {
+                section.line_end - section.line_start + 1
+            } else {
+                0
+            };
+
+            if section_len > max_section_len {
+                violations.push(PolicyViolation {
+                    file: file_path.to_string(),
+                    rule: rule_name(rule),
+                    message: format!(
+                        "Section too long: {:?} is {} lines (max allowed: {})",
+                        section.heading, section_len, max_section_len
+                    ),
+                    severity: rule_severity(rule),
+                    kind: "policy_violation".to_string(),
+                });
+            }
+        }
+    }
+
+    // Required link checks
+    if !rule.must_link_to.is_empty() {
+        let targets = extract_markdown_link_targets(file_path, content);
+        let mut target_paths: HashSet<String> = HashSet::new();
+        let mut target_keys: HashSet<String> = HashSet::new();
+
+        for target in targets {
+            target_paths.insert(target.path.clone());
+            let key = match target.anchor {
+                Some(anchor) => format!("{}#{}", target.path, anchor),
+                None => target.path.clone(),
+            };
+            target_keys.insert(key);
+        }
+
+        for required in &rule.must_link_to {
+            let (req_path, req_anchor) = normalize_required_link(file_path, required);
+            let satisfied = if let Some(anchor) = req_anchor {
+                target_keys.contains(&format!("{}#{}", req_path, anchor))
+            } else {
+                target_paths.contains(&req_path)
+            };
+
+            if !satisfied {
+                violations.push(PolicyViolation {
+                    file: file_path.to_string(),
+                    rule: rule_name(rule),
+                    message: format!("Missing required link: {:?}", required),
                     severity: rule_severity(rule),
                     kind: "policy_violation".to_string(),
                 });
@@ -6836,6 +7306,124 @@ fn cmd_orphans(
     Ok(())
 }
 
+fn build_inbound_link_counts(forward_index: &ForwardIndex) -> HashMap<String, usize> {
+    let mut inbound_counts: HashMap<String, usize> = HashMap::new();
+
+    for (source_path, entry) in &forward_index.files {
+        for link in &entry.links {
+            let target = &link.target;
+
+            if target.starts_with("http://")
+                || target.starts_with("https://")
+                || target.starts_with("mailto:")
+                || target.starts_with("ftp://")
+            {
+                continue;
+            }
+
+            let (link_path, _) = if let Some(idx) = target.find('#') {
+                (
+                    target[..idx].to_string(),
+                    Some(target[idx + 1..].to_string()),
+                )
+            } else {
+                (target.clone(), None)
+            };
+
+            if link_path.is_empty() {
+                continue;
+            }
+
+            let resolved_path = if let Some(stripped) = link_path.strip_prefix('/') {
+                stripped.to_string()
+            } else {
+                let source_file_path = Path::new(source_path);
+                if let Some(parent) = source_file_path.parent() {
+                    parent.join(&link_path).to_string_lossy().to_string()
+                } else {
+                    link_path.clone()
+                }
+            };
+
+            let normalized_link = normalize_path(Path::new(&resolved_path));
+            *inbound_counts.entry(normalized_link).or_insert(0) += 1;
+        }
+    }
+
+    inbound_counts
+}
+
+fn cmd_canonical_orphans(
+    index_dir: &Path,
+    threshold: f64,
+    json: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let forward_index = load_forward_index(index_dir)?;
+    let inbound_counts = build_inbound_link_counts(&forward_index);
+
+    let mut orphans = Vec::new();
+
+    for (file_path, entry) in &forward_index.files {
+        let inbound_links = *inbound_counts.get(file_path).unwrap_or(&0);
+        if inbound_links > 0 {
+            continue;
+        }
+
+        let score = score_canonicality(file_path, entry);
+        if score >= threshold {
+            orphans.push(CanonicalOrphan {
+                file: file_path.clone(),
+                canonicality: score,
+                inbound_links,
+            });
+        }
+    }
+
+    orphans.sort_by(|a, b| {
+        b.canonicality
+            .partial_cmp(&a.canonicality)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| a.file.cmp(&b.file))
+    });
+
+    let result = CanonicalOrphansResult {
+        total_orphans: orphans.len(),
+        threshold,
+        orphans: orphans.clone(),
+    };
+
+    if json {
+        println!("{}", serde_json::to_string_pretty(&result)?);
+        return Ok(());
+    }
+
+    println!("{}", "Canonical Orphans".cyan().bold());
+    println!("{}", "=".repeat(60));
+    println!();
+    println!("Threshold: {}", threshold);
+    println!("Total canonical orphans: {}", orphans.len());
+    println!();
+
+    if orphans.is_empty() {
+        println!(
+            "{}",
+            "No canonical documents without inbound links found.".green()
+        );
+        return Ok(());
+    }
+
+    for (idx, orphan) in orphans.iter().enumerate() {
+        println!("[{}] {}", idx + 1, orphan.file.white().bold());
+        println!(
+            "    Canonicality: {:.2}, Inbound links: {}",
+            orphan.canonicality, orphan.inbound_links
+        );
+        println!();
+    }
+
+    Ok(())
+}
+
 /// Score canonicality with reasons
 fn score_canonicality_with_reasons(doc_path: &str, _entry: &FileEntry) -> (f64, Vec<String>) {
     let mut score: f64 = 0.5; // baseline
@@ -7467,6 +8055,76 @@ Some content here.
                 .iter()
                 .any(|v| v.message.contains("Forbidden heading present")),
             "Expected a forbidden heading violation"
+        );
+    }
+
+    #[test]
+    fn test_policy_section_length_violation() {
+        let rule = PolicyRule {
+            pattern: "docs/*.md".to_string(),
+            max_section_length: Some(3),
+            section_heading_regex: Some("^Async".to_string()),
+            name: Some("status-section-length".to_string()),
+            severity: Some("warn".to_string()),
+            ..Default::default()
+        };
+
+        let content = r#"
+# Status
+
+## Async Migration
+line1
+line2
+line3
+line4
+
+## Other
+ok
+"#;
+
+        let violations =
+            collect_policy_violations_for_content(&rule, "docs/IMPLEMENTATION_STATUS.md", content);
+
+        assert!(
+            violations
+                .iter()
+                .any(|v| v.message.contains("Section too long")),
+            "Expected a section-length violation"
+        );
+    }
+
+    #[test]
+    fn test_policy_required_link() {
+        let rule = PolicyRule {
+            pattern: "docs/*.md".to_string(),
+            must_link_to: vec!["docs/ASYNC_MIGRATION_COMPLETE_SUMMARY.md".to_string()],
+            name: Some("status-requires-summary-link".to_string()),
+            severity: Some("error".to_string()),
+            ..Default::default()
+        };
+
+        let missing_link = r#"
+# Status
+No links here.
+"#;
+        let violations =
+            collect_policy_violations_for_content(&rule, "docs/IMPLEMENTATION_STATUS.md", missing_link);
+        assert!(
+            violations
+                .iter()
+                .any(|v| v.message.contains("Missing required link")),
+            "Expected a missing required link violation"
+        );
+
+        let with_link = r#"
+# Status
+See [summary](ASYNC_MIGRATION_COMPLETE_SUMMARY.md).
+"#;
+        let ok_violations =
+            collect_policy_violations_for_content(&rule, "docs/IMPLEMENTATION_STATUS.md", with_link);
+        assert!(
+            ok_violations.is_empty(),
+            "Did not expect violations when required link is present"
         );
     }
 
