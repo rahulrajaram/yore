@@ -1,0 +1,10 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+repo_root="$(git rev-parse --show-toplevel)"
+if [ -x "$repo_root/.githooks/pre-commit" ]; then
+  exec "$repo_root/.githooks/pre-commit"
+fi
+echo "No shared hook implementation found at $repo_root/.githooks/pre-commit." >&2
+echo "Install it with ./scripts/install-git-hooks.sh, or run commit with --no-verify." >&2
+exit 1

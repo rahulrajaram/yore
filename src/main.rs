@@ -77,7 +77,7 @@ OUTPUT FORMATS
   Most inspection commands support --json for structured output suitable for
   CI pipelines and automation agents. Commands with JSON support:
 
-    build, eval, query, similar, dupes, dupes-sections, check-links,
+    build, eval, query, similar, dupes, dupes-sections, check, check-links,
     fix-links, backlinks, orphans, canonicality, canonical-orphans, stale,
     suggest-consolidation, policy, diff, stats, mv, fix-references
 
@@ -117,6 +117,7 @@ enum Commands {
     ///
     ///   # Run links + staleness + taxonomy in one shot
     ///   yore check --links --stale --taxonomy --policy taxonomy.yaml
+    ///
     /// Run multiple checks in one pass (links, policy, stale).
     ///
     /// Designed for CI and automation; always emits JSON output.
@@ -151,7 +152,7 @@ enum Commands {
         #[arg(long)]
         ci: bool,
 
-        /// Kinds/check IDs that should cause a non-zero exit code (comma or space separated)
+        /// Kinds/check IDs that should cause a non-zero exit code (comma-separated; repeat flag to pass multiple)
         #[arg(long, value_delimiter = ',')]
         fail_on: Vec<String>,
 
@@ -230,10 +231,14 @@ enum Commands {
     ///
     /// Examples:
     ///   yore query kubernetes deployment --index .yore --limit 5
-    ///   yore query "async migration" --index .yore --files-only
+    ///   yore query --query '"async migration"' --phrase --index .yore --files-only
     Query {
         /// Search terms
         terms: Vec<String>,
+
+        /// Raw query string (avoids shell-quoting pitfalls; overrides positional terms)
+        #[arg(long)]
+        query: Option<String>,
 
         /// Maximum results to show
         #[arg(short = 'n', long, default_value = "10")]
@@ -250,6 +255,18 @@ enum Commands {
         /// Show top N distinctive terms per result (0 = disabled)
         #[arg(long, default_value = "0")]
         doc_terms: usize,
+
+        /// Show query diagnostics and scoring details (JSON output wraps results + diagnostics)
+        #[arg(long)]
+        explain: bool,
+
+        /// Do not filter stopwords from the query
+        #[arg(long)]
+        no_stopwords: bool,
+
+        /// Require exact adjacency matches for quoted segments (use --query to include quotes)
+        #[arg(long)]
+        phrase: bool,
 
         /// Index directory
         #[arg(short, long, default_value = ".yore")]
@@ -470,8 +487,10 @@ enum Commands {
     ///   yore assemble "How does authentication work?" \
     ///     --index .yore --max-tokens 8000 --depth 1 > context.md
     ///   yore assemble "async migration status" --index .yore --max-sections 10
+    ///   yore assemble --from-files docs/adr/ADR-0010.md docs/adr/ADR-0011.md --index .yore
     Assemble {
-        /// Natural language query/question
+        /// Natural language query/question (required unless --from-files is used)
+        #[arg(required_unless_present = "from_files")]
         query: Vec<String>,
 
         /// Maximum tokens in output (approximate)
@@ -493,6 +512,10 @@ enum Commands {
         /// Show top N distinctive terms per source document (0 = disabled)
         #[arg(long, default_value = "0")]
         doc_terms: usize,
+
+        /// Assemble context from explicit files (supports @list.txt)
+        #[arg(long, value_name = "PATH", num_args = 1..)]
+        from_files: Vec<String>,
 
         /// Index directory
         #[arg(short, long, default_value = ".yore")]
@@ -1733,12 +1756,28 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         }
         Commands::Query {
             terms,
+            query,
             limit,
             files_only,
             json,
             doc_terms,
+            explain,
+            no_stopwords,
+            phrase,
             index,
-        } => cmd_query(&terms, limit, files_only, json, doc_terms, &index),
+        } => {
+            let query_text = query.unwrap_or_else(|| terms.join(" "));
+            let options = QueryOptions {
+                limit,
+                files_only,
+                json,
+                doc_terms,
+                explain,
+                require_phrases: phrase,
+                filter_stopwords: !no_stopwords,
+            };
+            cmd_query(&query_text, &index, &options)
+        }
         Commands::Similar {
             file,
             limit,
@@ -1778,9 +1817,11 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             depth,
             format,
             doc_terms,
+            from_files,
             index,
         } => cmd_assemble(
             &query.join(" "),
+            &from_files,
             max_tokens,
             max_sections,
             depth,
@@ -2257,6 +2298,10 @@ fn index_file(path: &Path) -> Result<FileEntry, Box<dyn std::error::Error>> {
 }
 
 fn extract_keywords(text: &str) -> Vec<String> {
+    extract_keywords_with_options(text, true)
+}
+
+fn extract_keywords_with_options(text: &str, filter_stopwords: bool) -> Vec<String> {
     let stop_words: HashSet<&str> = [
         "a", "an", "the", "and", "or", "but", "in", "on", "at", "to", "for", "of", "with", "by",
         "from", "as", "is", "was", "are", "were", "been", "be", "have", "has", "had", "do", "does",
@@ -2276,8 +2321,65 @@ fn extract_keywords(text: &str) -> Vec<String> {
     word_re
         .find_iter(text)
         .map(|m| m.as_str().to_lowercase())
-        .filter(|w| w.len() >= 3 && !stop_words.contains(w.as_str()))
+        .filter(|w| w.len() >= 3 && (!filter_stopwords || !stop_words.contains(w.as_str())))
         .collect()
+}
+
+#[derive(Debug, Clone)]
+struct ParsedQuery {
+    terms: Vec<String>,
+    phrases: Vec<PhraseGroup>,
+}
+
+#[derive(Debug, Clone)]
+struct PhraseGroup {
+    terms: Vec<String>,
+}
+
+fn parse_query_terms(query: &str, filter_stopwords: bool) -> Vec<String> {
+    extract_keywords_with_options(query, filter_stopwords)
+}
+
+fn parse_query(query: &str, filter_stopwords: bool) -> ParsedQuery {
+    let mut parts: Vec<(String, bool)> = Vec::new();
+    let mut buffer = String::new();
+    let mut in_quote = false;
+
+    for ch in query.chars() {
+        if ch == '"' {
+            let trimmed = buffer.trim();
+            if !trimmed.is_empty() {
+                parts.push((trimmed.to_string(), in_quote));
+            }
+            buffer.clear();
+            in_quote = !in_quote;
+            continue;
+        }
+        buffer.push(ch);
+    }
+
+    let trimmed = buffer.trim();
+    if !trimmed.is_empty() {
+        parts.push((trimmed.to_string(), in_quote));
+    }
+
+    let mut terms = Vec::new();
+    let mut phrases = Vec::new();
+
+    for (text, is_phrase) in parts {
+        let parsed_terms = parse_query_terms(&text, filter_stopwords);
+        terms.extend(parsed_terms.iter().cloned());
+        if is_phrase {
+            let phrase_terms = extract_keywords_with_options(&text, false);
+            if !phrase_terms.is_empty() {
+                phrases.push(PhraseGroup {
+                    terms: phrase_terms,
+                });
+            }
+        }
+    }
+
+    ParsedQuery { terms, phrases }
 }
 
 /// Simple suffix-stripping stemmer
@@ -2462,6 +2564,9 @@ fn minhash_similarity(a: &[u64], b: &[u64]) -> f64 {
     matches as f64 / a.len() as f64
 }
 
+const BM25_K1: f64 = 1.5;
+const BM25_B: f64 = 0.75;
+
 /// Compute BM25 score for a document given query terms
 fn bm25_score(
     query_terms: &[String],
@@ -2469,15 +2574,12 @@ fn bm25_score(
     avg_doc_length: f64,
     idf_map: &HashMap<String, f64>,
 ) -> f64 {
-    const K1: f64 = 1.5;
-    const B: f64 = 0.75;
-
     if doc.doc_length == 0 {
         return 0.0;
     }
 
     let mut score = 0.0;
-    let norm_factor = 1.0 - B + B * (doc.doc_length as f64 / avg_doc_length);
+    let norm_factor = 1.0 - BM25_B + BM25_B * (doc.doc_length as f64 / avg_doc_length);
 
     for term in query_terms {
         let stemmed = stem_word(&term.to_lowercase());
@@ -2485,7 +2587,7 @@ fn bm25_score(
         let idf = idf_map.get(&stemmed).unwrap_or(&0.0);
 
         if tf > 0.0 {
-            score += idf * (tf * (K1 + 1.0)) / (tf + K1 * norm_factor);
+            score += idf * (tf * (BM25_K1 + 1.0)) / (tf + BM25_K1 * norm_factor);
         }
     }
 
@@ -2520,16 +2622,157 @@ fn lsh_buckets(files: &HashMap<String, FileEntry>, bands: usize) -> HashMap<u64,
     buckets
 }
 
-fn cmd_query(
-    terms: &[String],
+fn contains_phrase_tokens(haystack: &[String], needle: &[String]) -> bool {
+    if needle.is_empty() || haystack.len() < needle.len() {
+        return false;
+    }
+    haystack
+        .windows(needle.len())
+        .any(|window| window == needle)
+}
+
+struct QueryDiagnostics {
+    tokens: Vec<String>,
+    stems: Vec<String>,
+    missing_terms: Vec<String>,
+    idf_values: Vec<(String, String, f64)>,
+    index_path: String,
+    doc_count: usize,
+}
+
+fn build_query_diagnostics(
+    parsed: &ParsedQuery,
+    forward_index: &ForwardIndex,
+    index_dir: &Path,
+) -> QueryDiagnostics {
+    let tokens = parsed.terms.clone();
+    let stems: Vec<String> = tokens
+        .iter()
+        .map(|t| stem_word(&t.to_lowercase()))
+        .collect();
+    let mut missing_set: HashSet<String> = HashSet::new();
+    let mut missing_terms = Vec::new();
+    let mut idf_values = Vec::new();
+
+    for term in &tokens {
+        let stem = stem_word(&term.to_lowercase());
+        let idf = *forward_index.idf_map.get(&stem).unwrap_or(&0.0);
+        idf_values.push((term.clone(), stem.clone(), idf));
+        if !forward_index.idf_map.contains_key(&stem) && missing_set.insert(term.clone()) {
+            missing_terms.push(term.clone());
+        }
+    }
+
+    QueryDiagnostics {
+        tokens,
+        stems,
+        missing_terms,
+        idf_values,
+        index_path: index_dir.display().to_string(),
+        doc_count: forward_index.files.len(),
+    }
+}
+
+fn print_query_diagnostics(
+    diagnostics: &QueryDiagnostics,
+    include_scoring: bool,
+    include_suggestions: bool,
+) {
+    println!("{}", "Diagnostics:".dimmed());
+    println!(
+        "  {} {}",
+        "tokens:".dimmed(),
+        if diagnostics.tokens.is_empty() {
+            "(none)".to_string()
+        } else {
+            diagnostics.tokens.join(" ")
+        }
+    );
+    println!(
+        "  {} {}",
+        "stems:".dimmed(),
+        if diagnostics.stems.is_empty() {
+            "(none)".to_string()
+        } else {
+            diagnostics.stems.join(" ")
+        }
+    );
+    println!(
+        "  {} {}",
+        "missing:".dimmed(),
+        if diagnostics.missing_terms.is_empty() {
+            "(none)".to_string()
+        } else {
+            diagnostics.missing_terms.join(" ")
+        }
+    );
+    println!(
+        "  {} {} ({} docs)",
+        "index:".dimmed(),
+        diagnostics.index_path,
+        diagnostics.doc_count
+    );
+
+    if include_scoring {
+        let mut idf_parts = Vec::new();
+        for (term, stem, idf) in &diagnostics.idf_values {
+            idf_parts.push(format!("{}->{}:{:.3}", term, stem, idf));
+        }
+        println!(
+            "  {} {}",
+            "idf:".dimmed(),
+            if idf_parts.is_empty() {
+                "(none)".to_string()
+            } else {
+                idf_parts.join(", ")
+            }
+        );
+        println!("  {} k1={:.2}, b={:.2}", "bm25:".dimmed(), BM25_K1, BM25_B);
+    }
+
+    if include_suggestions {
+        println!(
+            "  {} try fewer terms; use --no-stopwords; run yore stats; check index path",
+            "suggestions:".dimmed()
+        );
+    }
+}
+
+struct QueryOptions {
     limit: usize,
     files_only: bool,
     json: bool,
     doc_terms: usize,
+    explain: bool,
+    require_phrases: bool,
+    filter_stopwords: bool,
+}
+
+fn cmd_query(
+    query: &str,
     index_dir: &Path,
+    options: &QueryOptions,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    let parsed = parse_query(query, options.filter_stopwords);
+    if parsed.terms.is_empty() {
+        if options.json {
+            let obj = serde_json::json!({
+                "query": query,
+                "error": "no_query_terms"
+            });
+            println!("{}", serde_json::to_string_pretty(&obj)?);
+        } else {
+            println!(
+                "{}",
+                "No searchable terms in query. Try different keywords or use --no-stopwords."
+                    .yellow()
+            );
+        }
+        return Ok(());
+    }
     let _reverse_index = load_reverse_index(index_dir)?;
     let forward_index = load_forward_index(index_dir)?;
+    let diagnostics = build_query_diagnostics(&parsed, &forward_index, index_dir);
 
     // Compute BM25 scores for all documents
     let mut file_scores: Vec<(String, f64)> = forward_index
@@ -2537,7 +2780,7 @@ fn cmd_query(
         .iter()
         .map(|(path, entry)| {
             let score = bm25_score(
-                terms,
+                &parsed.terms,
                 entry,
                 forward_index.avg_doc_length,
                 &forward_index.idf_map,
@@ -2549,11 +2792,44 @@ fn cmd_query(
 
     // Sort by BM25 score (descending)
     file_scores.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-    file_scores.truncate(limit);
+    let results = if parsed.phrases.is_empty() {
+        file_scores.truncate(options.limit);
+        file_scores
+    } else {
+        let candidate_cap = std::cmp::min(
+            file_scores.len(),
+            std::cmp::max(options.limit.saturating_mul(10), 100),
+        );
+        let mut candidates = file_scores[..candidate_cap].to_vec();
 
-    let results = file_scores;
+        for (path, score) in candidates.iter_mut() {
+            let content = std::fs::read_to_string(Path::new(path)).unwrap_or_default();
+            let content_terms = extract_keywords_with_options(&content, false);
+            let mut matched_phrases = 0usize;
 
-    if json {
+            for phrase in &parsed.phrases {
+                if contains_phrase_tokens(&content_terms, &phrase.terms) {
+                    matched_phrases += 1;
+                }
+            }
+
+            if options.require_phrases && matched_phrases < parsed.phrases.len() {
+                *score = 0.0;
+            } else if matched_phrases > 0 {
+                *score += matched_phrases as f64;
+            }
+        }
+
+        if options.require_phrases {
+            candidates.retain(|(_, score)| *score > 0.0);
+        }
+
+        candidates.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        candidates.truncate(options.limit);
+        candidates
+    };
+
+    if options.json {
         let output: Vec<_> = results
             .iter()
             .map(|(path, score)| {
@@ -2561,42 +2837,93 @@ fn cmd_query(
                     "path": path,
                     "score": score
                 });
-                if doc_terms > 0 {
+                if options.doc_terms > 0 {
                     if let Some(entry) = forward_index.files.get(path) {
-                        let top_terms =
-                            get_top_doc_terms(entry, &forward_index.idf_map, terms, doc_terms);
+                        let top_terms = get_top_doc_terms(
+                            entry,
+                            &forward_index.idf_map,
+                            &parsed.terms,
+                            options.doc_terms,
+                        );
                         obj["doc_terms"] = serde_json::json!(top_terms);
                     }
                 }
                 obj
             })
             .collect();
-        println!("{}", serde_json::to_string_pretty(&output)?);
+
+        if options.explain {
+            let notice = if output.is_empty() {
+                Some("No data to explain.".to_string())
+            } else {
+                None
+            };
+            let diag_json = serde_json::json!({
+                "tokens": diagnostics.tokens,
+                "stems": diagnostics.stems,
+                "missing_terms": diagnostics.missing_terms,
+                "idf": diagnostics.idf_values.iter().map(|(term, stem, idf)| {
+                    serde_json::json!({
+                        "term": term,
+                        "stem": stem,
+                        "idf": idf
+                    })
+                }).collect::<Vec<_>>(),
+                "bm25": {
+                    "k1": BM25_K1,
+                    "b": BM25_B,
+                    "avg_doc_length": forward_index.avg_doc_length
+                },
+                "index_path": diagnostics.index_path,
+                "doc_count": diagnostics.doc_count,
+                "notice": notice,
+                "suggestions": if output.is_empty() {
+                    serde_json::json!(["try fewer terms", "use --no-stopwords", "run yore stats", "check index path"])
+                } else {
+                    serde_json::Value::Null
+                }
+            });
+            let wrapped = serde_json::json!({
+                "results": output,
+                "diagnostics": diag_json
+            });
+            println!("{}", serde_json::to_string_pretty(&wrapped)?);
+        } else {
+            println!("{}", serde_json::to_string_pretty(&output)?);
+        }
         return Ok(());
     }
 
     if results.is_empty() {
         println!("{}", "No results found.".yellow());
+        if options.explain {
+            println!("{}", "No data to explain.".dimmed());
+        }
+        print_query_diagnostics(&diagnostics, options.explain, true);
         return Ok(());
     }
 
     println!(
         "{} results for: {}\n",
         results.len().to_string().green().bold(),
-        terms.join(" ").cyan()
+        parsed.terms.join(" ").cyan()
     );
 
     for (file, score) in results {
-        if files_only {
+        if options.files_only {
             println!("{}", file);
         } else {
             println!("{} (score: {:.2})", file.cyan(), score);
 
             // Show doc terms if requested
-            if doc_terms > 0 {
+            if options.doc_terms > 0 {
                 if let Some(entry) = forward_index.files.get(&file) {
-                    let top_terms =
-                        get_top_doc_terms(entry, &forward_index.idf_map, terms, doc_terms);
+                    let top_terms = get_top_doc_terms(
+                        entry,
+                        &forward_index.idf_map,
+                        &parsed.terms,
+                        options.doc_terms,
+                    );
                     if !top_terms.is_empty() {
                         println!("  {} {}", "terms:".dimmed(), top_terms.join(", "));
                     }
@@ -2611,7 +2938,8 @@ fn cmd_query(
                         .map(|k| stem_word(&k))
                         .collect();
 
-                    let matches: Vec<_> = terms
+                    let matches: Vec<_> = parsed
+                        .terms
                         .iter()
                         .filter(|t| heading_keywords.contains(&stem_word(&t.to_lowercase())))
                         .collect();
@@ -2628,6 +2956,10 @@ fn cmd_query(
             }
             println!();
         }
+    }
+
+    if options.explain {
+        print_query_diagnostics(&diagnostics, true, false);
     }
 
     Ok(())
@@ -3604,6 +3936,15 @@ fn cmd_repl(index_dir: &Path) -> Result<(), Box<dyn std::error::Error>> {
 
     let stdin = io::stdin();
     let mut stdout = io::stdout();
+    let query_options = QueryOptions {
+        limit: 10,
+        files_only: false,
+        json: false,
+        doc_terms: 0,
+        explain: false,
+        require_phrases: false,
+        filter_stopwords: true,
+    };
 
     loop {
         print!("{} ", ">".cyan().bold());
@@ -3630,11 +3971,12 @@ fn cmd_repl(index_dir: &Path) -> Result<(), Box<dyn std::error::Error>> {
                 println!("  quit               - Exit");
             }
             "query" => {
-                let terms: Vec<String> = parts[1..].iter().map(|s| s.to_string()).collect();
-                if terms.is_empty() {
+                let trimmed = line.trim();
+                let rest = trimmed.strip_prefix("query").unwrap_or("").trim();
+                if rest.is_empty() {
                     println!("{}", "Usage: query <terms...>".yellow());
                 } else {
-                    let _ = cmd_query(&terms, 10, false, false, 0, index_dir);
+                    let _ = cmd_query(rest, index_dir, &query_options);
                 }
             }
             "similar" => {
@@ -3659,8 +4001,10 @@ fn cmd_repl(index_dir: &Path) -> Result<(), Box<dyn std::error::Error>> {
             }
             _ => {
                 // Treat as query
-                let terms: Vec<String> = parts.iter().map(|s| s.to_string()).collect();
-                let _ = cmd_query(&terms, 10, false, false, 0, index_dir);
+                let trimmed = line.trim();
+                if !trimmed.is_empty() {
+                    let _ = cmd_query(trimmed, index_dir, &query_options);
+                }
             }
         }
         println!();
@@ -3885,10 +4229,10 @@ fn search_relevant_sections(
     index: &ForwardIndex,
     max_sections: usize,
 ) -> Vec<SectionMatch> {
-    let query_terms: Vec<String> = query
-        .split_whitespace()
-        .map(|s| stem_word(&s.to_lowercase()))
-        .collect();
+    let query_terms = parse_query_terms(query, true);
+    if query_terms.is_empty() {
+        return Vec::new();
+    }
 
     let mut all_sections: Vec<SectionMatch> = Vec::new();
 
@@ -4989,10 +5333,7 @@ fn apply_extractive_refiner(
     query: &str,
     max_tokens_per_section: usize,
 ) -> Vec<SectionMatch> {
-    let query_terms: Vec<String> = query
-        .split_whitespace()
-        .map(|s| stem_word(&s.to_lowercase()))
-        .collect();
+    let query_terms = parse_query_terms(query, true);
 
     sections
         .into_iter()
@@ -5000,9 +5341,163 @@ fn apply_extractive_refiner(
         .collect()
 }
 
+fn expand_from_files_args(args: &[String]) -> Result<Vec<String>, Box<dyn std::error::Error>> {
+    let mut expanded = Vec::new();
+
+    for arg in args {
+        if let Some(list_path) = arg.strip_prefix('@') {
+            let content = fs::read_to_string(list_path)?;
+            for line in content.lines() {
+                let trimmed = line.trim();
+                if !trimmed.is_empty() {
+                    expanded.push(trimmed.to_string());
+                }
+            }
+        } else {
+            expanded.push(arg.to_string());
+        }
+    }
+
+    Ok(expanded)
+}
+
+fn resolve_indexed_path(input: &str, index: &ForwardIndex) -> Option<String> {
+    let trimmed = input.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    let mut candidates = Vec::new();
+    candidates.push(trimmed.to_string());
+    candidates.push(trimmed.trim_start_matches("./").to_string());
+
+    let normalized = normalize_path(Path::new(trimmed));
+    if !normalized.is_empty() {
+        candidates.push(normalized);
+    }
+
+    if Path::new(trimmed).is_absolute() {
+        if let Ok(cwd) = std::env::current_dir() {
+            if let Ok(stripped) = Path::new(trimmed).strip_prefix(&cwd) {
+                let stripped_str = stripped.to_string_lossy().to_string();
+                if !stripped_str.is_empty() {
+                    candidates.push(stripped_str);
+                }
+                let normalized_stripped = normalize_path(stripped);
+                if !normalized_stripped.is_empty() {
+                    candidates.push(normalized_stripped);
+                }
+            }
+        }
+    }
+
+    let mut seen = HashSet::new();
+    for candidate in candidates {
+        if !seen.insert(candidate.clone()) {
+            continue;
+        }
+        if index.files.contains_key(&candidate) {
+            return Some(candidate);
+        }
+        let with_dot = format!("./{}", candidate.trim_start_matches("./"));
+        if index.files.contains_key(&with_dot) {
+            return Some(with_dot);
+        }
+    }
+
+    None
+}
+
+fn resolve_from_files(inputs: &[String], index: &ForwardIndex) -> (Vec<String>, Vec<String>) {
+    let mut resolved = Vec::new();
+    let mut missing = Vec::new();
+    let mut seen = HashSet::new();
+
+    for input in inputs {
+        if let Some(path) = resolve_indexed_path(input, index) {
+            if seen.insert(path.clone()) {
+                resolved.push(path);
+            }
+        } else {
+            missing.push(input.clone());
+        }
+    }
+
+    (resolved, missing)
+}
+
+fn collect_sections_for_files(
+    file_paths: &[String],
+    index: &ForwardIndex,
+    query: &str,
+    max_sections: usize,
+) -> Vec<SectionMatch> {
+    let query_terms = if query.is_empty() {
+        Vec::new()
+    } else {
+        parse_query_terms(query, true)
+    };
+    let mut all_sections = Vec::new();
+
+    for path in file_paths {
+        let Some(entry) = index.files.get(path) else {
+            continue;
+        };
+        let doc_score = if query_terms.is_empty() {
+            1.0
+        } else {
+            bm25_score(&query_terms, entry, index.avg_doc_length, &index.idf_map)
+        };
+        let canonicality = score_canonicality(path, entry);
+
+        if !entry.section_fingerprints.is_empty() {
+            if let Ok(content) = fs::read_to_string(path) {
+                let lines: Vec<&str> = content.lines().collect();
+                for section in &entry.section_fingerprints {
+                    let start = section.line_start.saturating_sub(1);
+                    let end = section.line_end.min(lines.len());
+                    if start < end {
+                        let section_content = lines[start..end].join("\n");
+                        all_sections.push(SectionMatch {
+                            doc_path: path.to_string(),
+                            heading: section.heading.clone(),
+                            line_start: section.line_start,
+                            line_end: section.line_end,
+                            bm25_score: doc_score,
+                            content: section_content,
+                            canonicality,
+                        });
+                    }
+                }
+            }
+        } else if let Ok(content) = fs::read_to_string(path) {
+            all_sections.push(SectionMatch {
+                doc_path: path.to_string(),
+                heading: "Full Document".to_string(),
+                line_start: 1,
+                line_end: content.lines().count(),
+                bm25_score: doc_score,
+                content,
+                canonicality,
+            });
+        }
+    }
+
+    all_sections.sort_by(|a, b| {
+        let score_a = a.bm25_score * 0.7 + a.canonicality * 0.3;
+        let score_b = b.bm25_score * 0.7 + b.canonicality * 0.3;
+        score_b
+            .partial_cmp(&score_a)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+
+    all_sections.into_iter().take(max_sections).collect()
+}
+
 /// Main assemble command handler
 fn cmd_assemble(
     query: &str,
+    from_files: &[String],
     max_tokens: usize,
     max_sections: usize,
     depth: usize,
@@ -5015,12 +5510,50 @@ fn cmd_assemble(
     }
 
     let forward_index = load_forward_index(index_dir)?;
+    let query_label = if query.trim().is_empty() {
+        "selected files".to_string()
+    } else {
+        query.to_string()
+    };
+    let query_for_refiner = if query.trim().is_empty() { "" } else { query };
 
     // Phase 1: Primary section selection
-    let primary_sections = search_relevant_sections(query, &forward_index, max_sections);
+    let primary_sections = if !from_files.is_empty() {
+        let expanded = expand_from_files_args(from_files)?;
+        let (resolved, missing) = resolve_from_files(&expanded, &forward_index);
+
+        if !missing.is_empty() {
+            eprintln!(
+                "{}",
+                "Some files were not found in the index (they may be missing or excluded):"
+                    .yellow()
+            );
+            for path in missing {
+                eprintln!("  - {}", path);
+            }
+            return Ok(());
+        }
+
+        if resolved.is_empty() {
+            println!("# No indexed files matched the provided inputs.");
+            return Ok(());
+        }
+
+        collect_sections_for_files(&resolved, &forward_index, query, max_sections)
+    } else {
+        let query_terms = parse_query_terms(query, true);
+        if query_terms.is_empty() {
+            println!("# No searchable terms in query. Try different keywords.");
+            return Ok(());
+        }
+        search_relevant_sections(query, &forward_index, max_sections)
+    };
 
     if primary_sections.is_empty() {
-        println!("# No relevant sections found for query: \"{}\"", query);
+        println!(
+            "# No relevant sections found for query: \"{}\"",
+            query_label
+        );
         return Ok(());
     }
 
@@ -5065,12 +5598,17 @@ fn cmd_assemble(
 
     // Phase 3: Extractive refinement (increase signal density)
     let max_tokens_per_section = max_tokens / all_sections.len().max(1);
-    let refined_sections = apply_extractive_refiner(all_sections, query, max_tokens_per_section);
+    let refined_sections =
+        apply_extractive_refiner(all_sections, query_for_refiner, max_tokens_per_section);
 
     // If doc_terms requested, prepend a source summary
     if doc_terms > 0 {
         println!("<!-- Source Documents -->");
-        let query_terms: Vec<String> = extract_keywords(query);
+        let query_terms = if query_for_refiner.is_empty() {
+            Vec::new()
+        } else {
+            parse_query_terms(query_for_refiner, true)
+        };
         let mut seen_docs: HashSet<String> = HashSet::new();
 
         for section in &refined_sections {
@@ -5091,7 +5629,7 @@ fn cmd_assemble(
     }
 
     // Phase 4: Distill to markdown
-    let digest = distill_to_markdown(&refined_sections, query, max_tokens);
+    let digest = distill_to_markdown(&refined_sections, &query_label, max_tokens);
 
     println!("{}", digest);
 
@@ -5798,7 +6336,9 @@ fn extract_markdown_link_targets(file_path: &str, content: &str) -> Vec<LinkTarg
     let mut targets = Vec::new();
     let link_regex = Regex::new(r"(!?)\[(?P<label>[^\]]+)\]\((?P<target>[^)]+)\)").unwrap();
 
-    let origin_dir = Path::new(file_path).parent().unwrap_or_else(|| Path::new("."));
+    let origin_dir = Path::new(file_path)
+        .parent()
+        .unwrap_or_else(|| Path::new("."));
 
     for caps in link_regex.captures_iter(content) {
         if caps.get(1).is_some_and(|m| m.as_str() == "!") {
@@ -5876,12 +6416,16 @@ fn normalize_required_link(file_path: &str, required: &str) -> (String, Option<S
     let resolved = if path_part.is_empty() {
         PathBuf::from(file_path)
     } else if path_part.starts_with("../") {
-        let origin_dir = Path::new(file_path).parent().unwrap_or_else(|| Path::new("."));
+        let origin_dir = Path::new(file_path)
+            .parent()
+            .unwrap_or_else(|| Path::new("."));
         origin_dir.join(path_part)
     } else if path_part.starts_with('/') || path_part.contains('/') {
         PathBuf::from(path_part.trim_start_matches('/'))
     } else {
-        let origin_dir = Path::new(file_path).parent().unwrap_or_else(|| Path::new("."));
+        let origin_dir = Path::new(file_path)
+            .parent()
+            .unwrap_or_else(|| Path::new("."));
         origin_dir.join(path_part)
     };
 
@@ -8107,8 +8651,11 @@ ok
 # Status
 No links here.
 "#;
-        let violations =
-            collect_policy_violations_for_content(&rule, "docs/IMPLEMENTATION_STATUS.md", missing_link);
+        let violations = collect_policy_violations_for_content(
+            &rule,
+            "docs/IMPLEMENTATION_STATUS.md",
+            missing_link,
+        );
         assert!(
             violations
                 .iter()
@@ -8120,8 +8667,11 @@ No links here.
 # Status
 See [summary](ASYNC_MIGRATION_COMPLETE_SUMMARY.md).
 "#;
-        let ok_violations =
-            collect_policy_violations_for_content(&rule, "docs/IMPLEMENTATION_STATUS.md", with_link);
+        let ok_violations = collect_policy_violations_for_content(
+            &rule,
+            "docs/IMPLEMENTATION_STATUS.md",
+            with_link,
+        );
         assert!(
             ok_violations.is_empty(),
             "Did not expect violations when required link is present"
@@ -9028,5 +9578,159 @@ path = "../api-docs"
         assert_eq!(paths.len(), 2);
         assert_eq!(paths[0], "../runtime/docs");
         assert_eq!(paths[1], "../api-docs");
+    }
+
+    fn make_file_entry(path: &str) -> FileEntry {
+        FileEntry {
+            path: path.to_string(),
+            size_bytes: 0,
+            line_count: 0,
+            headings: Vec::new(),
+            keywords: Vec::new(),
+            body_keywords: Vec::new(),
+            links: Vec::new(),
+            simhash: 0,
+            term_frequencies: HashMap::new(),
+            doc_length: 0,
+            minhash: Vec::new(),
+            section_fingerprints: Vec::new(),
+        }
+    }
+
+    fn make_forward_index(files: Vec<FileEntry>) -> ForwardIndex {
+        let map = files
+            .into_iter()
+            .map(|entry| (entry.path.clone(), entry))
+            .collect();
+        ForwardIndex {
+            files: map,
+            indexed_at: "now".to_string(),
+            version: 1,
+            avg_doc_length: 0.0,
+            idf_map: HashMap::new(),
+        }
+    }
+
+    #[test]
+    fn test_parse_query_terms_punctuation_hyphen_case() {
+        let terms = parse_query_terms("Hello, async-migration!", true);
+        assert!(terms.contains(&"hello".to_string()));
+        assert!(terms.contains(&"async-migration".to_string()));
+    }
+
+    #[test]
+    fn test_parse_query_terms_stopwords_only() {
+        let terms = parse_query_terms("the and of", true);
+        assert!(terms.is_empty());
+    }
+
+    #[test]
+    fn test_parse_query_terms_mixed_case() {
+        let terms = parse_query_terms("TeSt CaSe", true);
+        assert_eq!(terms, vec!["test".to_string(), "case".to_string()]);
+    }
+
+    #[test]
+    fn test_parse_query_phrases() {
+        let parsed = parse_query("\"async migration\" plan", true);
+        assert_eq!(
+            parsed.terms,
+            vec![
+                "async".to_string(),
+                "migration".to_string(),
+                "plan".to_string()
+            ]
+        );
+        assert_eq!(parsed.phrases.len(), 1);
+        assert_eq!(
+            parsed.phrases[0].terms,
+            vec!["async".to_string(), "migration".to_string()]
+        );
+    }
+
+    #[test]
+    fn test_expand_from_files_args_supports_list() {
+        let dir = std::env::temp_dir().join(format!(
+            "yore-test-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&dir).unwrap();
+        let list_path = dir.join("files.txt");
+        fs::write(&list_path, "docs/a.md\n\n docs/b.md\n").unwrap();
+
+        let args = vec![
+            format!("@{}", list_path.to_string_lossy()),
+            "docs/c.md".to_string(),
+        ];
+        let expanded = expand_from_files_args(&args).unwrap();
+
+        assert_eq!(
+            expanded,
+            vec![
+                "docs/a.md".to_string(),
+                "docs/b.md".to_string(),
+                "docs/c.md".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn test_resolve_from_files_reports_missing() {
+        let index = make_forward_index(vec![make_file_entry("docs/a.md")]);
+        let inputs = vec!["./docs/a.md".to_string(), "docs/missing.md".to_string()];
+        let (resolved, missing) = resolve_from_files(&inputs, &index);
+        assert_eq!(resolved, vec!["docs/a.md".to_string()]);
+        assert_eq!(missing, vec!["docs/missing.md".to_string()]);
+    }
+
+    #[test]
+    fn test_collect_sections_for_files_max_sections() {
+        let dir = std::env::temp_dir().join(format!(
+            "yore-test-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&dir).unwrap();
+        let file_path = dir.join("doc.md");
+        fs::write(&file_path, "# Title\n\nBody\n\n## Sub\n\nMore").unwrap();
+        let file_path_str = file_path.to_string_lossy().to_string();
+
+        let entry = FileEntry {
+            path: file_path_str.clone(),
+            size_bytes: 0,
+            line_count: 0,
+            headings: Vec::new(),
+            keywords: Vec::new(),
+            body_keywords: Vec::new(),
+            links: Vec::new(),
+            simhash: 0,
+            term_frequencies: HashMap::new(),
+            doc_length: 0,
+            minhash: Vec::new(),
+            section_fingerprints: vec![
+                SectionFingerprint {
+                    heading: "Title".to_string(),
+                    level: 1,
+                    line_start: 1,
+                    line_end: 3,
+                    simhash: 0,
+                },
+                SectionFingerprint {
+                    heading: "Sub".to_string(),
+                    level: 2,
+                    line_start: 5,
+                    line_end: 6,
+                    simhash: 0,
+                },
+            ],
+        };
+        let index = make_forward_index(vec![entry]);
+        let sections = collect_sections_for_files(&[file_path_str], &index, "", 1);
+        assert_eq!(sections.len(), 1);
     }
 }

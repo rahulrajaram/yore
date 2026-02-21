@@ -11,6 +11,8 @@
 - Add section-length and required-link policy rules for targeted doc enforcement
 - Add `canonical-orphans` to report high-canonicality docs with no inbound links
 - Update OUTPUT FORMATS help section with complete command list
+- Align query parsing with indexing and add `--query`, `--phrase`, `--explain`, and `--no-stopwords` for better control
+- Add query diagnostics (tokens, stems, missing terms, index stats) and JSON diagnostics payloads
 
 ## 0.2.0
 

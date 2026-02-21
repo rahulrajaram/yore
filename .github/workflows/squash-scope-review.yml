@@ -1,0 +1,44 @@
+name: Squash scope review
+
+on:
+  pull_request:
+    branches: [ main, master ]
+    types: [opened, synchronize, reopened]
+  push:
+    branches-ignore:
+      - main
+      - master
+
+jobs:
+  squash-scope-review:
+    name: Analyze commit squashing opportunities
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+      issues: write
+    if: github.actor != 'dependabot[bot]'
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Run squash-scope analyzer
+        id: squash_scope
+        env:
+          YORE_BASE_REF: ${{ github.event_name == 'pull_request' && format('origin/{0}', github.base_ref) || github.event.before }}
+          YORE_HEAD_REF: ${{ github.sha }}
+          YORE_AI_HELPER: ${{ vars.YORE_AI_HELPER || '' }}
+          YORE_AI_ARGS: ${{ vars.YORE_AI_ARGS || '' }}
+          YORE_AI_INPUT_MODE: ${{ vars.YORE_AI_INPUT_MODE || 'stdin' }}
+          YORE_SQUASH_AI_ENABLED: ${{ vars.YORE_SQUASH_AI_ENABLED || '0' }}
+        run: |
+          bash scripts/squash-scope-review.sh
+
+      - name: Attach squash-scope report to PR
+        if: github.event_name == 'pull_request' && steps.squash_scope.outputs.squash_report != ''
+        uses: marocchino/sticky-pull-request-comment@v2
+        with:
+          header: Squash Scope Review
+          message: ${{ steps.squash_scope.outputs.squash_report }}

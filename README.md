@@ -162,6 +162,7 @@ Use BM25‑based search over the index:
 
 ```bash
 yore query kubernetes deployment --index docs/.index
+yore query --query '"async migration"' --phrase --index docs/.index
 ```
 
 ### 6.3 Detect duplicate content
@@ -264,11 +265,21 @@ yore query <terms...> --index <index-dir>
 * `--limit, -n` – Maximum number of results (default: 10)
 * `--files-only, -l` – Only show file paths
 * `--json` – Emit machine‑readable JSON
+* `--query` – Raw query string that overrides positional terms (avoids shell quoting)
+* `--phrase` – Require adjacency for quoted segments in the query (quotes must be part of the query string)
+* `--no-stopwords` – Keep stopwords in query matching
+* `--doc-terms` – Show top N distinctive terms per result (0 disables)
+* `--explain` – Emit diagnostics; with `--json`, output becomes `{ results, diagnostics }`
+
+**Query syntax**
+
+Queries are tokenized the same way as indexing (letters and numbers plus `_` and `-`), lowercased, and stemmed. Stopwords are removed by default; use `--no-stopwords` to keep them. Quoted phrases are only enforced when `--phrase` is set, and the quotes must be part of the query string (use `--query` to include them).
 
 **Example**
 
 ```bash
 yore query kubernetes deployment --limit 5 --index docs/.index
+yore query --query '"async migration" plan' --phrase --explain --index docs/.index
 ```
 
 ---
@@ -352,6 +363,8 @@ yore assemble <query> --index <index-dir>
 * `--max-sections, -s` – Maximum sections to include (default: 20)
 * `--depth, -d` – Cross‑reference expansion depth (default: 1, maximum 2)
 * `--format, -f` – Output format (`markdown` is the default)
+* `--doc-terms` – Show top N distinctive terms per source document (0 disables)
+* `--from-files` – Assemble from explicit files instead of a query (supports `@list.txt`)
 
 **Example**
 
@@ -360,6 +373,10 @@ yore assemble "How does the authentication system work?" \
   --max-tokens 6000 \
   --depth 1 \
   --index docs/.index > context.md
+
+# Assemble from explicit files
+yore assemble --from-files docs/adr/ADR-0010.md docs/adr/ADR-0011.md --index docs/.index
+yore assemble --from-files @file-list.txt --index docs/.index
 ```
 
 ---
@@ -391,6 +408,7 @@ yore eval --questions questions.jsonl --index docs/.index
 ### 7.7 `yore check`
 
 Runs one or more documentation checks in a single entrypoint.
+Output is always JSON for CI and automation.
 
 ```bash
 yore check [--links] [--taxonomy --policy <file>] --index <index-dir> [--ci --fail-on <kinds>]
@@ -452,6 +470,8 @@ yore check-links --index <index-dir>
 * `--json` – Emit machine‑readable JSON
 * `--root, -r` – Root directory for resolving relative paths (if different from index root)
 * `--summary` / `--summary-only` – Include or show only a grouped summary by file and by kind (`doc_missing`, `code_missing`, `placeholder`, etc.)
+
+Note: `--root` only applies to `check-links`. Other commands use index roots and profiles.
 
 The command reports broken links, missing target files, and invalid anchors, including source file and line location.
 

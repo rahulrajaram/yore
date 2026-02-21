@@ -1,0 +1,132 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+MSG_FILE="$1"
+MSG=$(cat "$MSG_FILE")
+
+# Allow merge and revert commits to bypass checks
+if grep -Eiq '^(merge|revert) ' "$MSG_FILE"; then
+  exit 0
+fi
+
+# Normalize line endings to Unix style (handle Windows CRLF and old Mac CR)
+MSG=$(printf '%s' "$MSG" | tr '\r' '\n' | sed 's/\n\n*/\n/g')
+
+# Remove comment lines (starting with #) but preserve structure
+# Use a while loop to maintain line numbers and structure
+CLEAN_MSG=""
+while IFS= read -r line; do
+    # Skip comment lines
+    if [[ ! "$line" =~ ^# ]]; then
+        CLEAN_MSG="${CLEAN_MSG}${line}"$'\n'
+    fi
+done <<< "$MSG"
+
+# Remove trailing newlines only (not internal blank lines!)
+CLEAN_MSG=$(printf '%s' "$CLEAN_MSG" | sed -e :a -e '/^\n*$/{$d;N;ba;}')
+
+# Check if message is empty after removing comments
+if [ -z "$(printf '%s' "$CLEAN_MSG" | tr -d '[:space:]')" ]; then
+  echo "[commit-msg] Commit message cannot be empty (ignoring template comments)" >&2
+  exit 1
+fi
+
+# Split message into lines array for analysis
+mapfile -t lines <<< "$CLEAN_MSG"
+
+# Get subject (first non-empty line)
+subject=""
+subject_idx=0
+for i in "${!lines[@]}"; do
+    if [ -n "${lines[$i]}" ]; then
+        subject="${lines[$i]}"
+        subject_idx=$i
+        break
+    fi
+done
+
+fail=0
+
+# Subject must not be empty
+if [ -z "$subject" ]; then
+  echo "[commit-msg] Subject line must not be empty" >&2
+  fail=1
+fi
+
+# Subject length <= 72 chars
+if [ ${#subject} -gt 72 ]; then
+  echo "[commit-msg] Subject too long (${#subject} > 72): '$subject'" >&2
+  fail=1
+fi
+
+# Subject should not end with a period
+if printf '%s' "$subject" | grep -qE '\.$'; then
+  echo "[commit-msg] Subject must not end with a period" >&2
+  fail=1
+fi
+
+# Subject should start with capital letter (allow for special prefixes and conventional commits)
+# Allow: [TICKET-123], feat:, fix:, docs:, style:, refactor:, test:, chore:, etc.
+if ! printf '%s' "$subject" | grep -qE '^(\[.*\] )?(feat|fix|docs|style|refactor|test|chore|perf|ci|build|revert):|^(\[.*\] )?[A-Z]'; then
+  echo "[commit-msg] Subject should start with a capital letter or use conventional commit format: '$subject'" >&2
+  fail=1
+fi
+
+# Check for body and blank line separation
+has_body=false
+body_start_idx=-1
+
+# Look for content after the subject line
+for i in "${!lines[@]}"; do
+    if [ $i -gt $subject_idx ]; then
+        # Skip trailing empty lines when checking for body
+        remaining_content=$(printf '%s\n' "${lines[@]:$i}" | sed -e :a -e '/^\n*$/{$d;N;ba;}' | tr -d '[:space:]')
+        if [ -n "$remaining_content" ]; then
+            has_body=true
+            # Find first non-empty line after subject
+            for j in "${!lines[@]}"; do
+                if [ $j -gt $subject_idx ] && [ -n "${lines[$j]}" ]; then
+                    body_start_idx=$j
+                    break
+                fi
+            done
+            break
+        fi
+    fi
+done
+
+# If there's a body, ensure there's a blank line after subject
+if [ "$has_body" = true ] && [ $body_start_idx -ne -1 ]; then
+    # Check if the line immediately after subject is empty
+    next_line_idx=$((subject_idx + 1))
+    if [ $next_line_idx -lt ${#lines[@]} ]; then
+        if [ -n "${lines[$next_line_idx]}" ]; then
+            echo "[commit-msg] Second line must be blank when body is present" >&2
+            fail=1
+        fi
+    fi
+    
+    # Check body line lengths (only for actual body content)
+    for i in "${!lines[@]}"; do
+        if [ $i -ge $body_start_idx ]; then
+            line="${lines[$i]}"
+            # Skip empty lines and be lenient with URLs
+            if [ -n "$line" ] && ! echo "$line" | grep -qE 'https?://'; then
+                if [ ${#line} -gt 72 ]; then
+                    line_num=$((i + 1))
+                    echo "[commit-msg] Body line $line_num exceeds 72 chars (${#line}): '${line:0:40}...'" >&2
+                    fail=1
+                    break
+                fi
+            fi
+        fi
+    done
+fi
+
+if [ $fail -eq 1 ]; then
+  echo "" >&2
+  echo "[commit-msg] See .gitmessage for commit message guidelines" >&2
+  echo "[commit-msg] Use 'git commit --no-verify' to bypass these checks" >&2
+fi
+
+exit $fail

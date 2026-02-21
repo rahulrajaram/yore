@@ -1,0 +1,97 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+repo_root="$(git rev-parse --show-toplevel)"
+if [ -z "$repo_root" ]; then
+  echo "Unable to determine repository root." >&2
+  exit 1
+fi
+
+if [ "${YORE_SKIP_HOOK_PATH_CHECK:-0}" != "1" ]; then
+  configured_path="$(git config --get core.hooksPath || echo "")"
+  expected_path_one="$repo_root/.githooks"
+  expected_path_two="$repo_root/scripts/git-hooks"
+  configured_absolute=""
+  if [ -n "$configured_path" ]; then
+    configured_absolute="$(cd "$repo_root/$configured_path" 2>/dev/null && pwd || true)"
+  fi
+
+  if [ "${configured_absolute:-}" != "$expected_path_one" ] && [ "${configured_absolute:-}" != "$expected_path_two" ]; then
+    if [ "${ALLOW_HOOKS_PATH_MISMATCH:-}" != "1" ]; then
+      echo "[pre-commit] core.hooksPath is not set to a Yore-supported hooks directory." >&2
+      echo "            Configure with: git config core.hooksPath .githooks" >&2
+      echo "            Or run this commit once with ALLOW_HOOKS_PATH_MISMATCH=1" >&2
+      exit 1
+    fi
+  fi
+fi
+
+staged_files="$(git diff --cached --name-only --diff-filter=ACMR || true)"
+if [ -z "$staged_files" ]; then
+  echo "No staged files found. Running squash-scope check only."
+  if [ "${YORE_SKIP_SQUASH_SCOPE_CHECK:-0}" != "1" ]; then
+    "$repo_root/scripts/squash-scope-review.sh"
+  fi
+  exit 0
+fi
+
+run_rust_checks() {
+  if ! command -v cargo >/dev/null 2>&1; then
+    return 0
+  fi
+
+  if printf '%s' "$staged_files" | grep -qE '\.rs$'; then
+    (cd "$repo_root" && cargo fmt --all -- --check)
+    if [ "${YORE_SKIP_CARGO_CHECK:-0}" != "1" ]; then
+      (cd "$repo_root" && cargo check --locked --workspace --all-targets)
+    fi
+  fi
+}
+
+scan_for_sensitive_content() {
+  if [ "${YORE_SKIP_SENSITIVE_CHECK:-0}" = "1" ]; then
+    return 0
+  fi
+
+  local patch_file
+  patch_file="$(mktemp)"
+  git diff --cached --no-color > "$patch_file"
+
+  local patterns=(
+    "AKIA[0-9A-Z]{16}"
+    "ghp_[A-Za-z0-9_]{20,}"
+    "gho_[A-Za-z0-9_]{20,}"
+    "ghu_[A-Za-z0-9_]{20,}"
+    "ghs_[A-Za-z0-9_]{20,}"
+    "github_pat_[A-Za-z0-9_]{20,}"
+    "xox[baprs]-[0-9]{10,}-[A-Za-z0-9-]+"
+    "BEGIN (RSA|EC|OPENSSH|DSA) PRIVATE KEY"
+    "BEGIN PRIVATE KEY"
+    "BEGIN PGP PRIVATE KEY BLOCK"
+  )
+
+  local matched=0
+  for pattern in "${patterns[@]}"; do
+    if grep -E -n "$pattern" "$patch_file" >/dev/null; then
+      echo "Potential sensitive content pattern match: $pattern" >&2
+      grep -E -n "$pattern" "$patch_file" >&2
+      matched=1
+    fi
+  done
+
+  rm -f "$patch_file"
+
+  if [ "$matched" -eq 1 ]; then
+    echo "Sensitive-content scan failed. Review staged changes or set YORE_SKIP_SENSITIVE_CHECK=1." >&2
+    return 1
+  fi
+}
+
+run_rust_checks
+scan_for_sensitive_content
+
+if [ "${YORE_SKIP_SQUASH_SCOPE_CHECK:-0}" = "0" ]; then
+  "$repo_root/scripts/squash-scope-review.sh"
+else
+  echo "Skipping squash-scope review by request."
+fi
