@@ -54,7 +54,7 @@ fn test_query_multi_term_returns_results() {
     let (ok_single, stdout_single) = run_cmd(single);
     assert!(ok_single, "single-term query failed");
     let single_json: Value = serde_json::from_str(&stdout_single).unwrap();
-    assert!(single_json.as_array().unwrap().len() > 0);
+    assert!(!single_json.as_array().unwrap().is_empty());
 
     let mut multi = Command::new(env!("CARGO_BIN_EXE_yore"));
     multi
@@ -64,7 +64,7 @@ fn test_query_multi_term_returns_results() {
     let (ok_multi, stdout_multi) = run_cmd(multi);
     assert!(ok_multi, "multi-term query failed");
     let multi_json: Value = serde_json::from_str(&stdout_multi).unwrap();
-    assert!(multi_json.as_array().unwrap().len() > 0);
+    assert!(!multi_json.as_array().unwrap().is_empty());
 }
 
 #[test]

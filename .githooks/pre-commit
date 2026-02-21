@@ -65,15 +65,29 @@ scan_for_sensitive_content() {
 
   local patterns=(
     "AKIA[0-9A-Z]{16}"
+    "ASIA[0-9A-Z]{16}"
+    "A3T[0-9A-Z]{16}"
     "ghp_[A-Za-z0-9_]{20,}"
     "gho_[A-Za-z0-9_]{20,}"
     "ghu_[A-Za-z0-9_]{20,}"
     "ghs_[A-Za-z0-9_]{20,}"
     "github_pat_[A-Za-z0-9_]{20,}"
+    "ghr_[A-Za-z0-9_]{20,}"
     "xox[baprs]-[0-9]{10,}-[A-Za-z0-9-]+"
+    "xoxa-[0-9]+-[A-Za-z0-9-]+"
+    "xoxo-[0-9]+-[A-Za-z0-9-]+"
+    "AIza[0-9A-Za-z-_]{35}"
+    "sk-proj-[A-Za-z0-9]{20,}"
+    "sk-[A-Za-z0-9]{20,}"
+    "hf_[A-Za-z0-9]{34}"
+    "sk_live_[0-9a-zA-Z]{24}"
+    "pk_live_[0-9a-zA-Z]{24}"
+    "sk_test_[0-9a-zA-Z]{24}"
+    "pk_test_[0-9a-zA-Z]{24}"
     "BEGIN (RSA|EC|OPENSSH|DSA) PRIVATE KEY"
     "BEGIN PRIVATE KEY"
     "BEGIN PGP PRIVATE KEY BLOCK"
+    "BEGIN ENCRYPTED PRIVATE KEY"
   )
 
   local matched=0

@@ -6,6 +6,11 @@ Cargo.lock
 .yore/
 .yore-test/
 
+# YARLI runtime state and workspaces
+.yarli/
+.yarl/
+.yarl/workspaces/
+
 # Editor files
 *.swp
 *.swo
