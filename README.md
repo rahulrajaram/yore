@@ -163,6 +163,8 @@ Use BM25‑based search over the index:
 ```bash
 yore query kubernetes deployment --index docs/.index
 yore query --query '"async migration"' --phrase --index docs/.index
+yore query --query '"async migration" plan' --phrase --explain --index docs/.index
+yore query --query '"async migration" plan' --phrase --explain --json --index docs/.index
 ```
 
 ### 6.3 Detect duplicate content
@@ -270,10 +272,32 @@ yore query <terms...> --index <index-dir>
 * `--no-stopwords` – Keep stopwords in query matching
 * `--doc-terms` – Show top N distinctive terms per result (0 disables)
 * `--explain` – Emit diagnostics; with `--json`, output becomes `{ results, diagnostics }`
+  * Diagnostics fields: `tokens`, `stems`, `missing_terms`, `idf`, `bm25`, `index_path`, `doc_count`
 
 **Query syntax**
 
 Queries are tokenized the same way as indexing (letters and numbers plus `_` and `-`), lowercased, and stemmed. Stopwords are removed by default; use `--no-stopwords` to keep them. Quoted phrases are only enforced when `--phrase` is set, and the quotes must be part of the query string (use `--query` to include them).
+
+`--explain` prints diagnostics to stdout for plain output. With `--json`, the same diagnostics are wrapped in machine-readable form:
+
+```json
+{
+  "results": [...],
+  "diagnostics": {
+    "tokens": ["async", "migration", "plan"],
+    "stems": ["async", "migration", "plan"],
+    "missing_terms": ["plan"],
+    "idf": [{ "term": "async", "stem": "async", "idf": 1.0 }],
+    "bm25": {
+      "k1": 1.5,
+      "b": 0.75,
+      "avg_doc_length": 220.0
+    },
+    "index_path": "docs/.index",
+    "doc_count": 42
+  }
+}
+```
 
 **Example**
 
@@ -718,6 +742,43 @@ Each suggestion identifies a canonical document and a set of files that are stro
 
 ```bash
 yore suggest-consolidation --index docs/.index --threshold 0.7 --json
+```
+
+---
+
+### 7.19 `yore vocabulary`
+
+Derive a deterministic list of domain-relevant vocabulary terms from indexed content.
+
+```bash
+yore vocabulary --index <index-dir>
+```
+
+**Key options**
+
+* `--index, -i` – Index directory (default: `.yore`)
+* `--limit, -n` – Maximum number of terms to return (default: `100`)
+* `--format` – Output format: `lines`, `json`, or `prompt` (default: `lines`)
+* `--json` – Alias for `--format json`
+* `--stopwords` – Optional custom stop-word file path
+* `--include-stemming` – Include stem-only terms when no surface form is available
+* `--no-default-stopwords` – Disable built-in vocabulary stop-words
+* `--common-terms <N>` – Drop the top `N` most common corpus terms before ranking vocabulary
+
+**Output modes**
+
+* `lines` (default): one term per line
+* `json`: structured payload including `format`, `limit`, `total`, and `terms`
+* `prompt`: comma-separated terms for LLM prompts
+
+**Example**
+
+```bash
+yore vocabulary --index docs/.index --limit 40 --format lines
+yore vocabulary --index docs/.index --format prompt --limit 100
+yore vocabulary --index docs/.index --format json --limit 25 --stopwords .yore-stopwords.txt
+yore vocabulary --index docs/.index --limit 80 --common-terms 20
+yore vocabulary --index docs/.index --no-default-stopwords --stopwords /usr/share/dict/words
 ```
 
 ---

@@ -20,3 +20,8 @@ Cargo.lock
 # OS files
 .DS_Store
 Thumbs.db
+
+# Generated LLM-driven vocabulary snapshots
+.yore-domain-terms-llm.txt
+.yore-stopwords-llm.txt
+.yore-uncertain-terms-llm.txt
