@@ -1,0 +1,55 @@
+name: Publish to crates.io
+
+on:
+  push:
+    tags: ["*"]
+
+jobs:
+  publish:
+    if: |
+      startsWith(github.ref, 'refs/tags/') &&
+      (startsWith(github.ref_name, 'v') || contains(github.ref_name, '.'))
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Validate release tag against Cargo version
+        run: |
+          set -euo pipefail
+
+          TAG_NAME="${GITHUB_REF_NAME}"
+          TAG_VERSION="${TAG_NAME#v}"
+          CARGO_VERSION="$(grep -m1 '^version = ' Cargo.toml | cut -d '\"' -f2)"
+
+          if ! printf '%s\n' "$TAG_VERSION" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]([.+-].*)?$'; then
+            echo "::error::Refusing to publish: tag '$TAG_NAME' is not SemVer-like."
+            exit 1
+          fi
+
+          if [ "$TAG_VERSION" != "$CARGO_VERSION" ]; then
+            echo "::error::Tag version '$TAG_VERSION' does not match Cargo.toml version '$CARGO_VERSION'."
+            exit 1
+          fi
+
+          echo "Publishing yore-cli version $CARGO_VERSION from tag $TAG_NAME"
+
+      - name: Build package for verification
+        run: cargo check --workspace --locked --all-targets
+
+      - name: Publish to crates.io
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [ -z "${CARGO_REGISTRY_TOKEN:-}" ]; then
+            echo "::error::CARGO_REGISTRY_TOKEN is not set. Add it to repository secrets."
+            exit 1
+          fi
+          cargo publish --locked --package yore-cli
