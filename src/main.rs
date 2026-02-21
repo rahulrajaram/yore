@@ -1822,11 +1822,13 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         } => cmd_assemble(
             &query.join(" "),
             &from_files,
-            max_tokens,
-            max_sections,
-            depth,
-            &format,
-            doc_terms,
+            &AssembleOptions {
+                max_tokens,
+                max_sections,
+                depth,
+                format,
+                doc_terms,
+            },
             &index,
         ),
         Commands::Eval {
@@ -2746,6 +2748,14 @@ struct QueryOptions {
     explain: bool,
     require_phrases: bool,
     filter_stopwords: bool,
+}
+
+struct AssembleOptions {
+    max_tokens: usize,
+    max_sections: usize,
+    depth: usize,
+    format: String,
+    doc_terms: usize,
 }
 
 fn cmd_query(
@@ -5498,14 +5508,10 @@ fn collect_sections_for_files(
 fn cmd_assemble(
     query: &str,
     from_files: &[String],
-    max_tokens: usize,
-    max_sections: usize,
-    depth: usize,
-    format: &str,
-    doc_terms: usize,
+    options: &AssembleOptions,
     index_dir: &Path,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    if format != "markdown" {
+    if options.format != "markdown" {
         return Err("Only markdown format is supported currently".into());
     }
 
@@ -5539,14 +5545,14 @@ fn cmd_assemble(
             return Ok(());
         }
 
-        collect_sections_for_files(&resolved, &forward_index, query, max_sections)
+        collect_sections_for_files(&resolved, &forward_index, query, options.max_sections)
     } else {
         let query_terms = parse_query_terms(query, true);
         if query_terms.is_empty() {
             println!("# No searchable terms in query. Try different keywords.");
             return Ok(());
         }
-        search_relevant_sections(query, &forward_index, max_sections)
+        search_relevant_sections(query, &forward_index, options.max_sections)
     };
 
     if primary_sections.is_empty() {
@@ -5565,7 +5571,7 @@ fn cmd_assemble(
     // Phase 2: Cross-reference expansion (if depth > 0)
     let mut all_sections = primary_sections.clone();
 
-    if depth > 0 {
+    if options.depth > 0 {
         // Build ADR index
         let adr_index = build_adr_index(&forward_index);
 
@@ -5576,8 +5582,9 @@ fn cmd_assemble(
         const XREF_TOKEN_FRACTION: f64 = 0.3;
         const XREF_TOKEN_ABS_MAX: usize = 2000;
 
-        let xref_cap = ((max_tokens as f64 * XREF_TOKEN_FRACTION) as usize).min(XREF_TOKEN_ABS_MAX);
-        let remaining_tokens = max_tokens.saturating_sub(primary_tokens);
+        let xref_cap =
+            ((options.max_tokens as f64 * XREF_TOKEN_FRACTION) as usize).min(XREF_TOKEN_ABS_MAX);
+        let remaining_tokens = options.max_tokens.saturating_sub(primary_tokens);
         let xref_token_budget = remaining_tokens.min(xref_cap);
 
         if xref_token_budget > 0 && !crossrefs.is_empty() {
@@ -5597,12 +5604,12 @@ fn cmd_assemble(
     }
 
     // Phase 3: Extractive refinement (increase signal density)
-    let max_tokens_per_section = max_tokens / all_sections.len().max(1);
+    let max_tokens_per_section = options.max_tokens / all_sections.len().max(1);
     let refined_sections =
         apply_extractive_refiner(all_sections, query_for_refiner, max_tokens_per_section);
 
     // If doc_terms requested, prepend a source summary
-    if doc_terms > 0 {
+    if options.doc_terms > 0 {
         println!("<!-- Source Documents -->");
         let query_terms = if query_for_refiner.is_empty() {
             Vec::new()
@@ -5618,8 +5625,12 @@ fn cmd_assemble(
             seen_docs.insert(section.doc_path.clone());
 
             if let Some(entry) = forward_index.files.get(&section.doc_path) {
-                let top_terms =
-                    get_top_doc_terms(entry, &forward_index.idf_map, &query_terms, doc_terms);
+                let top_terms = get_top_doc_terms(
+                    entry,
+                    &forward_index.idf_map,
+                    &query_terms,
+                    options.doc_terms,
+                );
                 if !top_terms.is_empty() {
                     println!("<!-- {} : {} -->", section.doc_path, top_terms.join(", "));
                 }
@@ -5629,7 +5640,7 @@ fn cmd_assemble(
     }
 
     // Phase 4: Distill to markdown
-    let digest = distill_to_markdown(&refined_sections, &query_label, max_tokens);
+    let digest = distill_to_markdown(&refined_sections, &query_label, options.max_tokens);
 
     println!("{}", digest);
 

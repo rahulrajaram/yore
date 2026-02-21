@@ -1,7 +1,15 @@
 # Changelog
 
-## 0.3.0
+## 0.3.1
+- Add `--query`, `--phrase`, `--explain`, and `--no-stopwords` for better query control and diagnostics.
+- Add query diagnostics (tokens, stems, missing terms, index stats) and JSON diagnostics payloads.
+- Add `--from-files` to `assemble` with `@list.txt` list expansion support.
+- Add local commit hooks for squash-scope review and optional LLM-assisted analysis.
+- Add a staged sensitive-content scan to pre-commit checks, plus hook install tooling.
+- Add a GitHub workflow to post squash-scope analysis on PRs for team visibility.
+- Align query parsing behavior with indexing tokenization and stemmer assumptions.
 
+## 0.3.0
 - Add `--json` flag to `build` and `eval` commands for structured output
 - Add `--track-renames` to `build` for git rename history extraction
 - Add `--use-git-history` to `fix-links` for rename-aware suggestions
@@ -11,8 +19,6 @@
 - Add section-length and required-link policy rules for targeted doc enforcement
 - Add `canonical-orphans` to report high-canonicality docs with no inbound links
 - Update OUTPUT FORMATS help section with complete command list
-- Align query parsing with indexing and add `--query`, `--phrase`, `--explain`, and `--no-stopwords` for better control
-- Add query diagnostics (tokens, stems, missing terms, index stats) and JSON diagnostics payloads
 
 ## 0.2.0
 
