@@ -421,6 +421,12 @@ Each line in the JSONL file represents a test question:
 
 Yore assembles context for each question, checks for expected substrings, and reports per‑question hits and an overall pass rate.
 
+**Key options**
+
+* `--questions` – Path to questions JSONL file (default: `questions.jsonl`)
+* `--index` – Index directory (default: `.yore`)
+* `--json` – Emit JSON output
+
 **Example**
 
 ```bash
@@ -435,14 +441,17 @@ Runs one or more documentation checks in a single entrypoint.
 Output is always JSON for CI and automation.
 
 ```bash
-yore check [--links] [--taxonomy --policy <file>] --index <index-dir> [--ci --fail-on <kinds>]
+yore check [--links] [--dupes] [--taxonomy --policy <file>] [--stale] --index <index-dir> [--stale-days <N>] [--ci --fail-on <kinds>]
 ```
 
 **Key options**
 
 * `--links` – Run link validation (same engine as `check-links`)
+* `--dupes` – Accepted by the checker, but duplicate detection is currently not executed there (use `yore dupes` directly)
 * `--taxonomy` – Run policy checks using a YAML policy file
 * `--policy` – Path to policy config (default: `.yore-policy.yaml`)
+* `--stale` – Run stale-document checks
+* `--stale-days` – Age threshold in days for stale checks (default: 30)
 * `--ci` – Enable CI‑style exit codes
 * `--fail-on` – Comma‑separated list of kinds/severities that should cause a non‑zero exit code (for example `doc_missing,code_missing,policy_error`)
 
@@ -519,6 +528,10 @@ yore fix-links --index <index-dir> [--dry-run|--apply]
 
 * `--dry-run` – Show proposed edits without modifying files
 * `--apply` – Apply changes to files on disk
+* `--propose` – Output ambiguous link fixes to a YAML file
+* `--apply-decisions` – Apply choices from a previous proposal file
+* `--json` – Emit JSON output
+* `--use-git-history` – Use git rename history when suggesting fixes for moved files
 
 The command looks for links whose targets do not correspond to any indexed file but whose filename matches exactly one indexed document under the same directory tree. It then rewrites those link targets to point to the matching file.
 
@@ -546,6 +559,7 @@ yore mv <from> <to> --index <index-dir> [--update-refs] [--dry-run]
 
 * `--update-refs` – Rewrite Markdown links that point to `<from>` so they point to `<to>`
 * `--dry-run` – Show planned moves/rewrites without modifying files
+* `--json` – Emit JSON output
 
 **Examples**
 
@@ -578,6 +592,14 @@ mappings:
 ```
 
 Each mapping is applied across all indexed files by rewriting `]({from})` to `]({to})`.
+
+**Key options**
+
+* `--mapping` – Path to reference mapping file (`from`/`to` pairs)
+* `--index` – Index directory (default: `.yore`)
+* `--dry-run` – Show planned changes without modifying files
+* `--apply` – Apply changes to files
+* `--json` – Emit JSON output
 
 **Examples**
 
@@ -779,6 +801,109 @@ yore vocabulary --index docs/.index --format prompt --limit 100
 yore vocabulary --index docs/.index --format json --limit 25 --stopwords .yore-stopwords.txt
 yore vocabulary --index docs/.index --limit 80 --common-terms 20
 yore vocabulary --index docs/.index --no-default-stopwords --stopwords /usr/share/dict/words
+```
+
+---
+
+### 7.20 `yore similar`
+
+Finds documents similar to a reference file.
+
+```bash
+yore similar <file> --index <index-dir>
+```
+
+**Key options**
+
+* `--limit, -n` – Maximum number of results (default: 5)
+* `--threshold` – Similarity threshold (0.0–1.0, default: 0.3)
+* `--json` – Emit machine‑readable JSON
+* `--doc-terms` – Show top N distinctive terms per result (0 disables)
+
+**Example**
+
+```bash
+yore similar docs/adr/ADR-0013-retries.md --index docs/.index --limit 5
+yore similar docs/architecture/AUTH.md --threshold 0.4 --json --index docs/.index
+```
+
+---
+
+### 7.21 `yore diff`
+
+Show overlapping content and shared sections between two files.
+
+```bash
+yore diff <file1> <file2> --index <index-dir>
+```
+
+**Key options**
+
+* `--json` – Emit JSON output
+
+**Example**
+
+```bash
+yore diff docs/old.md docs/new.md --index docs/.index --json
+```
+
+---
+
+### 7.22 `yore stats`
+
+Show high-level index statistics.
+
+```bash
+yore stats --index <index-dir>
+```
+
+**Key options**
+
+* `--top-keywords` – Number of top keywords to show (default: 20)
+* `--json` – Emit JSON output
+
+**Example**
+
+```bash
+yore stats --index docs/.index --top-keywords 20 --json
+```
+
+---
+
+### 7.23 `yore repl`
+
+Start an interactive query REPL over the index.
+
+```bash
+yore repl --index <index-dir>
+```
+
+**Example**
+
+```bash
+yore repl --index docs/.index
+```
+
+---
+
+### 7.24 `yore policy`
+
+Check documentation against declarative policy rules.
+
+```bash
+yore policy --config <file> --index <index-dir>
+```
+
+**Key options**
+
+* `--config` – Policy file path (default: `.yore-policy.yaml`)
+* `--index, -i` – Index directory (default: `.yore`)
+* `--json` – Emit JSON output
+
+**Example**
+
+```bash
+yore policy --config .yore-policy.yaml --index docs/.index --json
 ```
 
 ---

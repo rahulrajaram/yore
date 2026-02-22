@@ -124,7 +124,6 @@ enum Commands {
     ///
     /// Limitations:
     ///   - `--dupes` is accepted but not currently executed.
-    ///   - `--stale-days` is accepted but stale checks still use 90 days.
     ///
     /// Related:
     ///   - `yore check-links`, `yore policy`, `yore stale`
@@ -543,7 +542,7 @@ enum Commands {
     ///   yore eval --questions questions.jsonl --index .yore
     Eval {
         /// Path to questions JSONL file
-        #[arg(short, long, default_value = "questions.jsonl")]
+        #[arg(long, default_value = "questions.jsonl")]
         questions: PathBuf,
 
         /// Index directory
@@ -1743,7 +1742,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             fail_on,
             index,
             policy,
-            stale_days: _,
+            stale_days,
         } => {
             let index_path = resolve_index_path(index, cli.profile.as_deref(), &config);
 
@@ -1772,9 +1771,9 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 combined.policy = Some(policy_result);
             }
 
-            // Run staleness checks if requested (using default thresholds for now)
+            // Run staleness checks if requested
             if stale {
-                let stale_result = run_stale_check(&index_path, 90, 0)?;
+                let stale_result = run_stale_check(&index_path, stale_days, 0)?;
                 combined.stale = Some(stale_result);
             }
 
