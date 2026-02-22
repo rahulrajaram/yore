@@ -4,6 +4,8 @@ set -euo pipefail
 base_ref="${YORE_BASE_REF:-}"
 head_ref="${YORE_HEAD_REF:-HEAD}"
 needs_rewrite=0
+candidate_count=0
+candidate_payload=""
 ai_enabled="${YORE_SQUASH_AI_ENABLED:-0}"
 output_file="$(mktemp)"
 
@@ -22,8 +24,20 @@ append_pair() {
   local overlap=$3
   local score=$4
   local reason=$5
+  local a_subject=$6
+  local b_subject=$7
+
   needs_rewrite=1
+  candidate_count=$((candidate_count + 1))
+
+  a_subject=$(printf '%s' "$a_subject" | tr '\n' ' ' | tr '\r' ' ')
+  b_subject=$(printf '%s' "$b_subject" | tr '\n' ' ' | tr '\r' ' ')
+
   append_report "- \`$a_short\` \`$b_short\`: $reason (${score}% file-overlap, $overlap shared files)"
+  append_report "  - \`$a_short\`: $a_subject"
+  append_report "  - \`$b_short\`: $b_subject"
+
+  candidate_payload+="- pair: \`$a_short\` + \`$b_short\` | score=$score | overlap=$overlap | reason=$reason\n"
 }
 
 detect_base() {
@@ -74,6 +88,12 @@ emit_ai_review() {
     return 0
   fi
 
+  if [ "$candidate_count" -eq 0 ]; then
+    append_report ""
+    append_report "AI review skipped: no candidate pairs met heuristic criteria."
+    return 0
+  fi
+
   local ai_helper="${YORE_AI_HELPER:-}"
   if [ -z "$ai_helper" ]; then
     append_report ""
@@ -92,7 +112,10 @@ emit_ai_review() {
     read -r -a ai_args <<< "${YORE_AI_ARGS}"
   fi
 
-  local ai_prompt="Using the following commit summaries, identify whether these commits should be squashed and how to group them:\n\n${analysis_payload}"
+  local ai_prompt="Using this commit list and candidate heuristics, recommend squash behavior."
+  ai_prompt+="\n\nCommits reviewed: ${#commits[@]}\nRange: $range\n"
+  ai_prompt+="\nHeuristic candidates:\n${candidate_payload}\n"
+  ai_prompt+="\nCommit summaries for context:\n${analysis_payload}"
   local ai_output=""
   local ai_mode="${YORE_AI_INPUT_MODE:-stdin}"
   local status=0
@@ -112,7 +135,11 @@ emit_ai_review() {
   if [ "$status" -eq 0 ] && [ -n "$ai_output" ]; then
     append_report "$ai_output"
   else
-    append_report "AI review failed with exit code $status. Continue with heuristic report above."
+    if [ -z "$ai_output" ]; then
+      append_report "AI review returned no output. Continue with heuristic report above."
+    else
+      append_report "AI review failed with exit code $status. Continue with heuristic report above."
+    fi
   fi
 }
 
@@ -157,6 +184,7 @@ prev_commit=""
 prev_files_tmp=""
 prev_prefix=""
 prev_short=""
+prev_subject=""
 
 for commit in "${commits[@]}"; do
   short=$(git rev-parse --short "$commit")
@@ -193,7 +221,7 @@ for commit in "${commits[@]}"; do
       reason="similar scope"
       [ "$score" -ge 55 ] && reason="shared file overlap"
       [ "$score" -lt 55 ] && reason+=" and matching subject prefix"
-      append_pair "$prev_short" "$short" "$overlap" "$score" "$reason"
+      append_pair "$prev_short" "$short" "$overlap" "$score" "$reason" "$prev_subject" "$subject"
     else
       analysis_payload+="No candidate between \`$prev_short\` and \`$short\`"
       if [ "$overlap" -gt 0 ]; then
@@ -218,6 +246,7 @@ for commit in "${commits[@]}"; do
   prev_count=$changed_count
   prev_prefix="$prefix"
   prev_short="$short"
+  prev_subject="$subject"
 done
 
 if [ -n "$prev_files_tmp" ]; then
@@ -227,6 +256,15 @@ fi
 if [ "$needs_rewrite" -eq 0 ]; then
   append_report "No clear squash candidates found from overlap or message-prefix heuristics."
 else
+  append_report ""
+  append_report "## Suggested next action"
+  if [ "$candidate_count" -eq 1 ]; then
+    append_report "I found 1 candidate adjacent commit pair to review for squashing."
+  else
+    append_report "I found $candidate_count candidate adjacent commit pairs to review for squashing."
+  fi
+  append_report "Run the following and mark the listed pairs as \`squash\` or \`fixup\` where appropriate:"
+  append_report "- git rebase -i $base_ref"
   append_report ""
   append_report "_These are heuristics only. Use your judgment before collapsing history._"
 fi

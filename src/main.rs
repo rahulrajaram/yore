@@ -79,7 +79,7 @@ OUTPUT FORMATS
 
     build, eval, query, similar, dupes, dupes-sections, check, check-links,
     fix-links, backlinks, orphans, canonicality, canonical-orphans, stale,
-    suggest-consolidation, policy, diff, stats, mv, fix-references
+    vocabulary, suggest-consolidation, policy, diff, stats, mv, fix-references
 
   Example: yore check-links --index .yore --json | jq '.broken[]'"#
 )]
@@ -124,7 +124,6 @@ enum Commands {
     ///
     /// Limitations:
     ///   - `--dupes` is accepted but not currently executed.
-    ///   - `--stale-days` is accepted but stale checks still use 90 days.
     ///
     /// Related:
     ///   - `yore check-links`, `yore policy`, `yore stale`
@@ -543,7 +542,7 @@ enum Commands {
     ///   yore eval --questions questions.jsonl --index .yore
     Eval {
         /// Path to questions JSONL file
-        #[arg(short, long, default_value = "questions.jsonl")]
+        #[arg(long, default_value = "questions.jsonl")]
         questions: PathBuf,
 
         /// Index directory
@@ -553,6 +552,68 @@ enum Commands {
         /// Output as JSON
         #[arg(long)]
         json: bool,
+    },
+
+    /// Derive a deterministic vocabulary list from a built index.
+    ///
+    /// Use this command when you want a compact candidate vocabulary for
+    /// prompt engineering, glossary generation, or documentation normalization.
+    ///
+    /// Output formats:
+    ///   - `lines` (default): one term per line for easy filtering scripts
+    ///   - `json`: structured payload with `term`, `score`, and `count`
+    ///   - `prompt`: comma-separated terms for LLM initial prompts
+    ///
+    /// Usage guidance:
+    ///   1. Build an index: `yore build <path> --output .yore`
+    ///   2. Generate vocabulary candidates:
+    ///      - `yore vocabulary --index .yore --limit 200 --format lines`
+    ///      - `yore vocabulary --index .yore --format json --limit 50`
+    ///      - `yore vocabulary --index .yore --format prompt --limit 150`
+    ///   3. Optionally remove common words:
+    ///      - `yore vocabulary --index .yore --stopwords my.stopwords`
+    ///      - `yore vocabulary --index .yore --format json --json`
+    ///      - `yore vocabulary --index .yore --common-terms 20`
+    ///      - `yore vocabulary --index .yore --no-default-stopwords --common-terms 40`
+    ///      - `yore vocabulary --index .yore --no-default-stopwords --stopwords my.stopwords`
+    ///
+    /// Limitations:
+    ///   - Ranking is deterministic but may still evolve as stop-word defaults
+    ///     or indexing heuristics are tuned.
+    ///   - `--common-terms` derives a corpus-frequency stoplist and may remove
+    ///     domain terms in very small projects.
+    Vocabulary {
+        /// Index directory
+        #[arg(short, long, default_value = ".yore")]
+        index: PathBuf,
+
+        /// Maximum number of terms to return
+        #[arg(short = 'n', long, default_value = "100")]
+        limit: usize,
+
+        /// Output format: lines, json, or prompt
+        #[arg(long, default_value = "lines")]
+        format: String,
+
+        /// Alias for `--format json`
+        #[arg(long)]
+        json: bool,
+
+        /// Path to an additional stop-word list (optional; one word per line)
+        #[arg(long)]
+        stopwords: Option<PathBuf>,
+
+        /// Keep stem-only terms when no non-stem surface form is available
+        #[arg(long)]
+        include_stemming: bool,
+
+        /// Keep built-in stopword filtering enabled (set false with --no-default-stopwords)
+        #[arg(long)]
+        no_default_stopwords: bool,
+
+        /// Exclude the top N corpus-common terms before applying other filters
+        #[arg(long, default_value = "0")]
+        common_terms: usize,
     },
 
     /// Check all markdown links for validity.
@@ -1076,6 +1137,46 @@ struct StatsResult {
 struct KeywordCount {
     keyword: String,
     count: usize,
+}
+
+#[derive(Serialize, Debug)]
+struct VocabularyResult {
+    format: String,
+    limit: usize,
+    total: usize,
+    terms: Vec<VocabularyTerm>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    stopwords: Option<String>,
+    used_default_stopwords: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    auto_common_terms: Option<usize>,
+    include_stemming: bool,
+}
+
+#[derive(Serialize, Debug)]
+struct VocabularyTerm {
+    term: String,
+    score: f64,
+    count: usize,
+}
+
+#[derive(Debug, Clone)]
+struct VocabularyCandidateTerm {
+    term: String,
+    surface: Option<String>,
+    term_freq: usize,
+    doc_freq: usize,
+    first_file: String,
+    first_line: usize,
+    first_heading: String,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct VocabularyOptions<'a> {
+    stopwords: Option<&'a Path>,
+    include_stemming: bool,
+    no_default_stopwords: bool,
+    common_terms: usize,
 }
 
 // Mv output structure
@@ -1641,7 +1742,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             fail_on,
             index,
             policy,
-            stale_days: _,
+            stale_days,
         } => {
             let index_path = resolve_index_path(index, cli.profile.as_deref(), &config);
 
@@ -1670,9 +1771,9 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 combined.policy = Some(policy_result);
             }
 
-            // Run staleness checks if requested (using default thresholds for now)
+            // Run staleness checks if requested
             if stale {
-                let stale_result = run_stale_check(&index_path, 90, 0)?;
+                let stale_result = run_stale_check(&index_path, stale_days, 0)?;
                 combined.stale = Some(stale_result);
             }
 
@@ -1836,6 +1937,27 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             index,
             json,
         } => cmd_eval(&questions, &index, json),
+        Commands::Vocabulary {
+            index,
+            limit,
+            format,
+            json,
+            stopwords,
+            include_stemming,
+            no_default_stopwords,
+            common_terms,
+        } => cmd_vocabulary(
+            &index,
+            limit,
+            &format,
+            json,
+            VocabularyOptions {
+                stopwords: stopwords.as_deref(),
+                include_stemming,
+                no_default_stopwords,
+                common_terms,
+            },
+        ),
         Commands::CheckLinks {
             index,
             json,
@@ -2304,19 +2426,7 @@ fn extract_keywords(text: &str) -> Vec<String> {
 }
 
 fn extract_keywords_with_options(text: &str, filter_stopwords: bool) -> Vec<String> {
-    let stop_words: HashSet<&str> = [
-        "a", "an", "the", "and", "or", "but", "in", "on", "at", "to", "for", "of", "with", "by",
-        "from", "as", "is", "was", "are", "were", "been", "be", "have", "has", "had", "do", "does",
-        "did", "will", "would", "could", "should", "may", "might", "must", "shall", "can", "need",
-        "this", "that", "these", "those", "i", "you", "he", "she", "it", "we", "they", "what",
-        "which", "who", "whom", "whose", "where", "when", "why", "how", "all", "each", "every",
-        "both", "few", "more", "most", "other", "some", "such", "no", "nor", "not", "only", "own",
-        "same", "so", "than", "too", "very", "just", "also", "now", "here", "using", "used", "use",
-        "new", "first", "last", "next", "then", "see", "get", "set", "run", "add", "create",
-        "update", "delete",
-    ]
-    .into_iter()
-    .collect();
+    let stop_words: HashSet<&str> = default_query_stop_words().iter().copied().collect();
 
     let word_re = Regex::new(r"[a-zA-Z][a-zA-Z0-9_-]*").unwrap();
 
@@ -2364,7 +2474,6 @@ fn parse_query(query: &str, filter_stopwords: bool) -> ParsedQuery {
     if !trimmed.is_empty() {
         parts.push((trimmed.to_string(), in_quote));
     }
-
     let mut terms = Vec::new();
     let mut phrases = Vec::new();
 
@@ -4023,6 +4132,330 @@ fn cmd_repl(index_dir: &Path) -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
+fn cmd_vocabulary(
+    index_dir: &Path,
+    limit: usize,
+    format: &str,
+    json: bool,
+    options: VocabularyOptions<'_>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let reverse_index = match load_reverse_index(index_dir) {
+        Ok(index) => index,
+        Err(err) => {
+            if let Some(io_err) = err.downcast_ref::<std::io::Error>() {
+                if io_err.kind() == std::io::ErrorKind::NotFound {
+                    ReverseIndex {
+                        keywords: HashMap::new(),
+                    }
+                } else {
+                    return Err(err);
+                }
+            } else {
+                return Err(err);
+            }
+        }
+    };
+
+    let forward_index = load_forward_index(index_dir).ok();
+    let stopwords_path = options
+        .stopwords
+        .map(|path| path.to_string_lossy().to_string());
+    let mut stopwords =
+        load_vocabulary_stopwords(options.stopwords, !options.no_default_stopwords)?;
+    let auto_common_terms = if options.common_terms > 0 {
+        let candidate_metrics: Vec<VocabularyCandidateTerm> = reverse_index
+            .keywords
+            .iter()
+            .map(|(term, postings)| {
+                let term = term.to_string();
+                VocabularyCandidateTerm {
+                    term: term.clone(),
+                    surface: None,
+                    term_freq: postings.len(),
+                    doc_freq: postings
+                        .iter()
+                        .map(|posting| posting.file.clone())
+                        .collect::<HashSet<_>>()
+                        .len(),
+                    first_file: String::new(),
+                    first_line: usize::MAX,
+                    first_heading: String::new(),
+                }
+            })
+            .collect();
+        let common =
+            build_auto_common_vocabulary_stopwords(&candidate_metrics, options.common_terms);
+        for common_term in &common {
+            stopwords.insert(common_term.clone());
+        }
+        Some(common.len())
+    } else {
+        None
+    };
+
+    let mut candidates: Vec<VocabularyCandidateTerm> = reverse_index
+        .keywords
+        .into_iter()
+        .filter(|(_, postings)| !postings.is_empty())
+        .map(|(term, postings)| {
+            let mut ordered_postings = postings;
+
+            let mut docs = HashSet::new();
+            for posting in &ordered_postings {
+                docs.insert(posting.file.clone());
+            }
+            ordered_postings.sort_by(|a, b| {
+                a.file
+                    .cmp(&b.file)
+                    .then_with(|| {
+                        a.line
+                            .unwrap_or(usize::MAX)
+                            .cmp(&b.line.unwrap_or(usize::MAX))
+                    })
+                    .then_with(|| {
+                        a.heading
+                            .as_deref()
+                            .unwrap_or("")
+                            .cmp(b.heading.as_deref().unwrap_or(""))
+                    })
+            });
+
+            let first = ordered_postings.first().expect("postings non-empty");
+            let first_heading = first.heading.clone().unwrap_or_default();
+
+            VocabularyCandidateTerm {
+                term: term.clone(),
+                surface: resolve_vocabulary_surface(
+                    &term,
+                    &ordered_postings,
+                    forward_index.as_ref(),
+                ),
+                term_freq: ordered_postings.len(),
+                doc_freq: docs.len(),
+                first_file: first.file.clone(),
+                first_line: first.line.unwrap_or(usize::MAX),
+                first_heading,
+            }
+        })
+        .collect();
+
+    candidates.sort_by(|a, b| {
+        b.doc_freq
+            .cmp(&a.doc_freq)
+            .then_with(|| b.term_freq.cmp(&a.term_freq))
+            .then_with(|| a.first_file.cmp(&b.first_file))
+            .then_with(|| a.first_line.cmp(&b.first_line))
+            .then_with(|| a.first_heading.cmp(&b.first_heading))
+            .then_with(|| a.term.cmp(&b.term))
+    });
+
+    let mut terms = Vec::new();
+    for candidate in candidates.iter() {
+        let term = if let Some(surface) = &candidate.surface {
+            surface
+        } else if options.include_stemming {
+            &candidate.term
+        } else {
+            continue;
+        };
+
+        let term_lower = term.to_lowercase();
+        if !is_hygienic_vocabulary_term(term) || stopwords.contains(&term_lower) {
+            continue;
+        }
+
+        terms.push(VocabularyTerm {
+            term: term.clone(),
+            score: candidate.doc_freq as f64,
+            count: candidate.term_freq,
+        });
+    }
+    let (terms, total_candidates) = apply_vocabulary_limit(terms, limit);
+
+    let effective_format = if json { "json" } else { format };
+    let result = VocabularyResult {
+        format: effective_format.to_string(),
+        limit,
+        total: total_candidates,
+        terms,
+        stopwords: stopwords_path,
+        used_default_stopwords: !options.no_default_stopwords,
+        auto_common_terms,
+        include_stemming: options.include_stemming,
+    };
+
+    match effective_format {
+        "lines" => {
+            if !result.terms.is_empty() {
+                println!("{}", render_vocabulary_lines(&result.terms));
+            }
+            Ok(())
+        }
+        "json" => {
+            println!("{}", serde_json::to_string_pretty(&result)?);
+            Ok(())
+        }
+        "prompt" => {
+            println!("{}", render_vocabulary_prompt(&result.terms));
+            Ok(())
+        }
+        _ => Err(format!("Unsupported vocabulary format: {}", effective_format).into()),
+    }
+}
+
+fn render_vocabulary_prompt(terms: &[VocabularyTerm]) -> String {
+    let rendered_terms: Vec<String> = terms
+        .iter()
+        .map(|term| normalize_prompt_term(&term.term))
+        .filter(|term| !term.is_empty())
+        .collect();
+
+    rendered_terms.join(", ")
+}
+
+fn render_vocabulary_lines(terms: &[VocabularyTerm]) -> String {
+    terms
+        .iter()
+        .map(|term| term.term.clone())
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn apply_vocabulary_limit(
+    mut terms: Vec<VocabularyTerm>,
+    limit: usize,
+) -> (Vec<VocabularyTerm>, usize) {
+    let total = terms.len();
+    if terms.len() > limit {
+        terms.truncate(limit);
+    }
+    (terms, total)
+}
+
+fn build_auto_common_vocabulary_stopwords(
+    candidates: &[VocabularyCandidateTerm],
+    top_n: usize,
+) -> HashSet<String> {
+    if top_n == 0 || candidates.is_empty() {
+        return HashSet::new();
+    }
+
+    let mut candidates = candidates.to_vec();
+    candidates.sort_by(|a, b| {
+        b.term_freq
+            .cmp(&a.term_freq)
+            .then_with(|| b.doc_freq.cmp(&a.doc_freq))
+            .then_with(|| a.term.cmp(&b.term))
+    });
+
+    candidates
+        .into_iter()
+        .filter(|candidate| is_hygienic_vocabulary_term(&candidate.term))
+        .take(top_n)
+        .map(|candidate| candidate.term.to_lowercase())
+        .collect()
+}
+
+fn resolve_vocabulary_surface(
+    stem: &str,
+    postings: &[ReverseEntry],
+    forward_index: Option<&ForwardIndex>,
+) -> Option<String> {
+    #[derive(Debug)]
+    struct SurfaceCandidate {
+        value: String,
+        file: String,
+        line: usize,
+        source_rank: usize,
+        token_idx: usize,
+    }
+
+    let mut ordered_postings = postings.to_vec();
+    ordered_postings.sort_by(|a, b| {
+        a.file
+            .cmp(&b.file)
+            .then_with(|| {
+                a.line
+                    .unwrap_or(usize::MAX)
+                    .cmp(&b.line.unwrap_or(usize::MAX))
+            })
+            .then_with(|| {
+                a.heading
+                    .as_deref()
+                    .unwrap_or("")
+                    .cmp(b.heading.as_deref().unwrap_or(""))
+            })
+    });
+
+    let mut candidates: Vec<SurfaceCandidate> = Vec::new();
+
+    for posting in &ordered_postings {
+        if let Some(heading) = &posting.heading {
+            for (token_idx, token) in extract_keywords(heading).into_iter().enumerate() {
+                if stem_word(&token) == stem {
+                    candidates.push(SurfaceCandidate {
+                        value: token,
+                        file: posting.file.clone(),
+                        line: posting.line.unwrap_or(usize::MAX),
+                        source_rank: 0,
+                        token_idx,
+                    });
+                }
+            }
+        }
+
+        if let Some(forward_index) = forward_index {
+            if let Some(entry) = forward_index.files.get(&posting.file) {
+                for (token_idx, token) in entry
+                    .keywords
+                    .iter()
+                    .chain(entry.body_keywords.iter())
+                    .enumerate()
+                {
+                    if stem_word(&token.to_lowercase()) == stem {
+                        candidates.push(SurfaceCandidate {
+                            value: token.to_lowercase(),
+                            file: posting.file.clone(),
+                            line: posting.line.unwrap_or(usize::MAX),
+                            source_rank: 1,
+                            token_idx,
+                        });
+                    }
+                }
+            }
+        }
+    }
+
+    if candidates.is_empty() {
+        return None;
+    }
+
+    candidates.sort_by(|a, b| {
+        a.source_rank
+            .cmp(&b.source_rank)
+            .then_with(|| a.file.cmp(&b.file))
+            .then_with(|| a.line.cmp(&b.line))
+            .then_with(|| a.token_idx.cmp(&b.token_idx))
+            .then_with(|| a.value.cmp(&b.value))
+    });
+
+    candidates.first().map(|candidate| candidate.value.clone())
+}
+
+fn normalize_prompt_term(term: &str) -> String {
+    let no_control: String = term
+        .chars()
+        .filter(|character| !character.is_control())
+        .collect();
+
+    no_control
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .trim()
+        .to_string()
+}
+
 // Helper functions
 
 fn load_forward_index(index_dir: &Path) -> Result<ForwardIndex, Box<dyn std::error::Error>> {
@@ -4037,6 +4470,193 @@ fn load_reverse_index(index_dir: &Path) -> Result<ReverseIndex, Box<dyn std::err
     let content =
         fs::read_to_string(&path).map_err(|_| "Index not found. Run 'yore build' first.")?;
     Ok(serde_json::from_str(&content)?)
+}
+
+fn default_query_stop_words() -> &'static [&'static str] {
+    &[
+        "a", "an", "and", "are", "as", "at", "be", "by", "for", "from", "had", "has", "have", "he",
+        "in", "is", "it", "not", "of", "on", "or", "that", "the", "their", "there", "these",
+        "they", "this", "to", "was", "we", "were", "what", "when", "where", "which", "who", "will",
+        "with", "would", "you", "your", "did", "do", "does", "can", "could", "must", "shall",
+        "should", "may", "might", "new", "using", "used", "use", "add", "set", "run", "get", "see",
+        "only", "no", "so", "than", "then", "them", "all", "any", "both", "each", "more", "most",
+        "some", "such", "own", "same", "just", "also", "now", "other", "into", "about", "up",
+        "over",
+    ]
+}
+
+fn default_vocabulary_stop_words() -> &'static [&'static str] {
+    &[
+        "a",
+        "an",
+        "and",
+        "are",
+        "as",
+        "at",
+        "be",
+        "by",
+        "for",
+        "from",
+        "had",
+        "has",
+        "have",
+        "he",
+        "in",
+        "is",
+        "it",
+        "not",
+        "of",
+        "on",
+        "or",
+        "that",
+        "the",
+        "their",
+        "there",
+        "these",
+        "they",
+        "this",
+        "to",
+        "was",
+        "we",
+        "were",
+        "what",
+        "when",
+        "where",
+        "which",
+        "who",
+        "will",
+        "with",
+        "would",
+        "you",
+        "your",
+        "did",
+        "do",
+        "does",
+        "can",
+        "could",
+        "must",
+        "shall",
+        "should",
+        "may",
+        "might",
+        "new",
+        "using",
+        "used",
+        "use",
+        "add",
+        "set",
+        "run",
+        "get",
+        "see",
+        "only",
+        "no",
+        "so",
+        "than",
+        "then",
+        "them",
+        "all",
+        "any",
+        "both",
+        "each",
+        "more",
+        "most",
+        "some",
+        "such",
+        "own",
+        "same",
+        "just",
+        "also",
+        "now",
+        "other",
+        "into",
+        "about",
+        "up",
+        "over",
+        "document",
+        "documents",
+        "docs",
+        "json",
+        "changes",
+        "change",
+        "build",
+        "output",
+        "validation",
+        "command",
+        "commands",
+        "prompting",
+        "workflow",
+        "core",
+        "keep",
+        "apply",
+        "file",
+        "files",
+        "reporting",
+        "pattern",
+        "examples",
+        "help",
+        "format",
+        "index",
+        "indexes",
+        "indexer",
+        "indexing",
+    ]
+}
+
+fn load_vocabulary_stopwords(
+    stopwords: Option<&Path>,
+    include_default: bool,
+) -> Result<HashSet<String>, Box<dyn std::error::Error>> {
+    let mut words: HashSet<String> = default_vocabulary_stop_words()
+        .iter()
+        .map(|word| word.to_string())
+        .collect();
+
+    if !include_default {
+        words.clear();
+    }
+
+    if let Some(path) = stopwords {
+        let path_value = path.to_string_lossy().to_string();
+        let content = fs::read_to_string(path)
+            .map_err(|err| format!("Unable to read stop-word file '{}': {}", path_value, err))?;
+
+        for token in content.split_whitespace() {
+            if !token.is_empty() {
+                words.insert(token.to_lowercase());
+            }
+        }
+    }
+
+    Ok(words)
+}
+
+fn is_hygienic_vocabulary_term(term: &str) -> bool {
+    if term.len() < 3 || term.len() > 48 {
+        return false;
+    }
+
+    let mut digits = 0usize;
+    let mut letters = 0usize;
+
+    for ch in term.chars() {
+        if ch.is_ascii_digit() {
+            digits += 1;
+        } else if ch.is_ascii_alphabetic() {
+            letters += 1;
+        } else if !matches!(ch, '-' | '_') {
+            return false;
+        }
+    }
+
+    if letters == 0 {
+        return false;
+    }
+
+    if digits > 0 && digits.saturating_mul(10) >= term.len().saturating_mul(6) {
+        return false;
+    }
+
+    true
 }
 
 fn jaccard_similarity(a: &HashSet<String>, b: &HashSet<String>) -> f64 {
@@ -9633,6 +10253,263 @@ path = "../api-docs"
     fn test_parse_query_terms_stopwords_only() {
         let terms = parse_query_terms("the and of", true);
         assert!(terms.is_empty());
+    }
+
+    #[test]
+    fn test_load_vocabulary_stopwords_merges_defaults_and_custom() {
+        let default_words = load_vocabulary_stopwords(None, true).unwrap();
+        assert!(default_words.contains("the"));
+        assert!(default_words.contains("using"));
+
+        let custom_path = "tmp-vocabulary-stopwords.txt";
+        fs::write(custom_path, "custom\nThe\nvocab-test\n").unwrap();
+        let merged_words = load_vocabulary_stopwords(Some(Path::new(custom_path)), true).unwrap();
+
+        fs::remove_file(custom_path).unwrap();
+        assert!(merged_words.contains("custom"));
+        assert!(merged_words.contains("the"));
+        assert!(merged_words.contains("vocab-test"));
+    }
+
+    #[test]
+    fn test_load_vocabulary_stopwords_can_disable_defaults() {
+        let stopwords = load_vocabulary_stopwords(None, false).unwrap();
+        assert!(!stopwords.contains("the"));
+        assert!(!stopwords.contains("and"));
+        assert!(stopwords.is_empty());
+    }
+
+    #[test]
+    fn test_build_auto_common_vocabulary_stopwords() {
+        let candidates = vec![
+            VocabularyCandidateTerm {
+                term: "build".into(),
+                surface: None,
+                term_freq: 12,
+                doc_freq: 2,
+                first_file: "a".into(),
+                first_line: 1,
+                first_heading: "Build".into(),
+            },
+            VocabularyCandidateTerm {
+                term: "yore".into(),
+                surface: None,
+                term_freq: 9,
+                doc_freq: 3,
+                first_file: "a".into(),
+                first_line: 1,
+                first_heading: "Yore".into(),
+            },
+            VocabularyCandidateTerm {
+                term: "indexer".into(),
+                surface: None,
+                term_freq: 8,
+                doc_freq: 5,
+                first_file: "a".into(),
+                first_line: 1,
+                first_heading: "Index".into(),
+            },
+        ];
+
+        let common = build_auto_common_vocabulary_stopwords(&candidates, 2);
+        assert!(common.contains("build"));
+        assert!(common.contains("yore"));
+        assert_eq!(common.len(), 2);
+    }
+
+    #[test]
+    fn test_is_hygienic_vocabulary_term() {
+        assert!(!is_hygienic_vocabulary_term("th"));
+        assert!(is_hygienic_vocabulary_term("yore"));
+        assert!(!is_hygienic_vocabulary_term("a1234567890"));
+        assert!(!is_hygienic_vocabulary_term("12345"));
+        assert!(!is_hygienic_vocabulary_term("v2.0"));
+        assert!(!is_hygienic_vocabulary_term("x"));
+    }
+
+    #[test]
+    fn test_apply_vocabulary_limit_preserves_total_and_truncates_terms() {
+        let terms = vec![
+            VocabularyTerm {
+                term: "alpha".into(),
+                score: 3.0,
+                count: 4,
+            },
+            VocabularyTerm {
+                term: "beta".into(),
+                score: 2.0,
+                count: 3,
+            },
+            VocabularyTerm {
+                term: "gamma".into(),
+                score: 1.0,
+                count: 2,
+            },
+        ];
+        let (clipped, total) = apply_vocabulary_limit(terms, 2);
+        assert_eq!(total, 3);
+        assert_eq!(clipped.len(), 2);
+        assert_eq!(clipped[0].term, "alpha");
+        assert_eq!(clipped[1].term, "beta");
+    }
+
+    #[test]
+    fn test_render_vocabulary_lines() {
+        let terms = vec![
+            VocabularyTerm {
+                term: "alpha".into(),
+                score: 1.2,
+                count: 7,
+            },
+            VocabularyTerm {
+                term: "beta".into(),
+                score: 0.9,
+                count: 5,
+            },
+        ];
+        assert_eq!(render_vocabulary_lines(&terms), "alpha\nbeta");
+    }
+
+    #[test]
+    fn test_render_vocabulary_prompt_normalizes_terms() {
+        let terms = vec![
+            VocabularyTerm {
+                term: "alpha beta".into(),
+                score: 1.0,
+                count: 2,
+            },
+            VocabularyTerm {
+                term: "gamma\x00delta".into(),
+                score: 1.0,
+                count: 2,
+            },
+            VocabularyTerm {
+                term: "  spaced   out  ".into(),
+                score: 1.0,
+                count: 2,
+            },
+        ];
+        assert_eq!(
+            render_vocabulary_prompt(&terms),
+            "alpha beta, gammadelta, spaced out"
+        );
+    }
+
+    #[test]
+    fn test_vocabulary_term_json_shape() {
+        let result = VocabularyResult {
+            format: "json".into(),
+            limit: 2,
+            total: 3,
+            terms: vec![
+                VocabularyTerm {
+                    term: "alpha".into(),
+                    score: 2.0,
+                    count: 7,
+                },
+                VocabularyTerm {
+                    term: "beta".into(),
+                    score: 1.1,
+                    count: 4,
+                },
+            ],
+            stopwords: None,
+            used_default_stopwords: true,
+            auto_common_terms: None,
+            include_stemming: false,
+        };
+        let json_value: serde_json::Value = serde_json::to_value(&result).unwrap();
+        assert_eq!(json_value["terms"][0]["term"], "alpha");
+        assert_eq!(json_value["terms"][0]["score"], 2.0);
+        assert_eq!(json_value["terms"][0]["count"], 7);
+        assert_eq!(json_value["terms"].as_array().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn test_resolve_vocabulary_surface_prefers_heading_surface() {
+        let postings = vec![
+            ReverseEntry {
+                file: "notes.md".to_string(),
+                line: Some(10),
+                heading: Some("alpha term".to_string()),
+                level: None,
+            },
+            ReverseEntry {
+                file: "guide.md".to_string(),
+                line: Some(2),
+                heading: None,
+                level: None,
+            },
+        ];
+        let forward = make_forward_index(vec![
+            make_file_entry("notes.md"),
+            FileEntry {
+                path: "guide.md".to_string(),
+                size_bytes: 0,
+                line_count: 0,
+                headings: Vec::new(),
+                keywords: vec!["term".to_string(), "other".to_string()],
+                body_keywords: vec!["term".to_string()],
+                links: Vec::new(),
+                simhash: 0,
+                term_frequencies: HashMap::new(),
+                doc_length: 0,
+                minhash: Vec::new(),
+                section_fingerprints: Vec::new(),
+            },
+        ]);
+        let resolved = resolve_vocabulary_surface("term", &postings, Some(&forward)).unwrap();
+        assert_eq!(resolved, "term");
+    }
+
+    #[test]
+    fn test_resolve_vocabulary_surface_fallbacks_to_forward_index() {
+        let postings = vec![
+            ReverseEntry {
+                file: "notes.md".to_string(),
+                line: Some(10),
+                heading: None,
+                level: None,
+            },
+            ReverseEntry {
+                file: "guide.md".to_string(),
+                line: Some(2),
+                heading: None,
+                level: None,
+            },
+        ];
+        let forward = make_forward_index(vec![
+            FileEntry {
+                path: "notes.md".to_string(),
+                size_bytes: 0,
+                line_count: 0,
+                headings: Vec::new(),
+                keywords: vec!["word".to_string()],
+                body_keywords: vec![],
+                links: Vec::new(),
+                simhash: 0,
+                term_frequencies: HashMap::new(),
+                doc_length: 0,
+                minhash: Vec::new(),
+                section_fingerprints: Vec::new(),
+            },
+            FileEntry {
+                path: "guide.md".to_string(),
+                size_bytes: 0,
+                line_count: 0,
+                headings: Vec::new(),
+                keywords: vec!["word".to_string()],
+                body_keywords: vec![],
+                links: Vec::new(),
+                simhash: 0,
+                term_frequencies: HashMap::new(),
+                doc_length: 0,
+                minhash: Vec::new(),
+                section_fingerprints: Vec::new(),
+            },
+        ]);
+        let resolved = resolve_vocabulary_surface("word", &postings, Some(&forward)).unwrap();
+        assert_eq!(resolved, "word");
     }
 
     #[test]

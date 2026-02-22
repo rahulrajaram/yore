@@ -1,8 +1,17 @@
 # Changelog
 
+## 0.4.0
+- Add missing command coverage in the help and README command reference (`similar`, `diff`, `stats`, `repl`, `policy`) for full CLI parity.
+- Add missing option documentation for `eval`, `fix-links`, `mv`, and `fix-references` to keep CLI guidance congruent with behavior.
+- Fix command-line validation by removing `eval`'s conflicting `-q` shorthand with global `-q/--quiet`.
+- Wire `check --stale-days` through to runtime stale checks and keep help output aligned.
+- Improve duplicate-policy wording in `check` help and behavior documentation to avoid misleading user expectations.
+
 ## 0.3.1
 - Add `--query`, `--phrase`, `--explain`, and `--no-stopwords` for better query control and diagnostics.
 - Add query diagnostics (tokens, stems, missing terms, index stats) and JSON diagnostics payloads.
+- Add `yore vocabulary` with `lines`, `json`, and `prompt` formats for deterministic term extraction from index coverage.
+- Add vocabulary default stop-word filtering, optional `--stopwords`, and `--include-stemming` behavior.
 - Add `--from-files` to `assemble` with `@list.txt` list expansion support.
 - Add local commit hooks for squash-scope review and optional LLM-assisted analysis.
 - Add a staged sensitive-content scan to pre-commit checks, plus hook install tooling.

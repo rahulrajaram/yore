@@ -63,7 +63,7 @@ tool_cap = 8
 # Runner backend: native | overwatch
 runner = "native"
 # Working directory for command execution (`~` and `$VARS` are expanded).
-working_dir = "/home/rahul/Documents/yore"
+working_dir = "."
 # Root directory for per-task workspaces/worktrees (required when features.parallel = true).
 # `~` and `$VARS` are expanded.
 worktree_root = ".yarl/workspaces"
@@ -85,7 +85,7 @@ service_url = "http://127.0.0.1:8089"
 [run]
 # Optional default prompt file for `yarli run`.
 # Resolution precedence: --prompt-file > run.prompt_file > PROMPT.md fallback.
-# prompt_file = "PROMPT.md"
+prompt_file = "PROMPT.md"
 # Optional default objective when no prompt override is present.
 # objective = "verify workspace"
 # Seconds to wait for continuation payload availability (`yarli run continue`).
@@ -129,8 +129,8 @@ enforce_plan_tranche_allowed_paths = false
 
 [budgets]
 # Token guardrails (enabled by default to prevent runaway cost).
-max_task_total_tokens = 25000
-max_run_total_tokens = 250000
+max_task_total_tokens = 500000
+max_run_total_tokens = 5000000
 
 # Optional hard limits. Leave commented/unset for no limit.
 # max_task_rss_bytes = 1073741824

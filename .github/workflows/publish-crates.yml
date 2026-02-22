@@ -2,13 +2,11 @@ name: Publish to crates.io
 
 on:
   push:
-    tags: ["*"]
+    tags: ["v[0-9]*.[0-9]*.[0-9]*"]
 
 jobs:
   publish:
-    if: |
-      startsWith(github.ref, 'refs/tags/') &&
-      (startsWith(github.ref_name, 'v') || contains(github.ref_name, '.'))
+    if: startsWith(github.ref_name, 'v')
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -20,6 +18,15 @@ jobs:
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
 
+      - name: Validate release token is present
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: |
+          if [ -z "${CARGO_REGISTRY_TOKEN:-}" ]; then
+            echo "::error::CARGO_REGISTRY_TOKEN is not set. Add it to repository secrets."
+            exit 1
+          fi
+
       - name: Validate release tag against Cargo version
         run: |
           set -euo pipefail
@@ -28,7 +35,7 @@ jobs:
           TAG_VERSION="${TAG_NAME#v}"
           CARGO_VERSION="$(grep -m1 '^version = ' Cargo.toml | cut -d '\"' -f2)"
 
-          if ! printf '%s\n' "$TAG_VERSION" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]([.+-].*)?$'; then
+          if ! printf '%s\n' "$TAG_NAME" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+([.+-][0-9A-Za-z.-]+)?$'; then
             echo "::error::Refusing to publish: tag '$TAG_NAME' is not SemVer-like."
             exit 1
           fi
@@ -47,9 +54,4 @@ jobs:
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
         run: |
-          set -euo pipefail
-          if [ -z "${CARGO_REGISTRY_TOKEN:-}" ]; then
-            echo "::error::CARGO_REGISTRY_TOKEN is not set. Add it to repository secrets."
-            exit 1
-          fi
           cargo publish --locked --package yore-cli

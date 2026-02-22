@@ -6,6 +6,11 @@ Cargo.lock
 .yore/
 .yore-test/
 
+# YARLI runtime state and workspaces
+.yarli/
+.yarl/
+.yarl/workspaces/
+
 # Editor files
 *.swp
 *.swo
@@ -15,3 +20,8 @@ Cargo.lock
 # OS files
 .DS_Store
 Thumbs.db
+
+# Generated LLM-driven vocabulary snapshots
+.yore-domain-terms-llm.txt
+.yore-stopwords-llm.txt
+.yore-uncertain-terms-llm.txt
