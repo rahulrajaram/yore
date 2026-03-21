@@ -57,6 +57,7 @@ At a high level, yore provides:
 - **Indexing** of documentation files (Markdown, text, etc.) using BM25 and structural metadata.
 - **Search and analysis** over that index: free‑text search, duplicate detection, canonicality scoring, link graph queries.
 - **Context assembly for LLMs**, including cross‑reference expansion and extractive refinement controlled by an explicit token budget.
+- **Bounded agent retrieval**, with JSON-first preview/fetch flows that keep large context off transcript until explicitly requested.
 - **Quality checks**, such as link validation and an evaluation harness for retrieval correctness.
 
 Some example questions Yore helps answer:
@@ -106,14 +107,18 @@ Yore operates in four main phases:
 2. **Retrieval and analysis**
    Commands such as `yore query`, `yore dupes`, `yore dupes-sections`, `yore canonicality`, `yore canonical-orphans`, `yore check-links`, `yore backlinks`, and `yore orphans` operate against this index to answer questions about relevance, duplication, authority, and link structure.
 
-3. **Context assembly for LLMs**
-   The `yore assemble` command runs a multi‑stage pipeline:
+3. **Context assembly for LLMs and agents**
+   Yore supports two retrieval shapes over the same index:
+
+   - `yore assemble` for a markdown digest you want to hand directly to an LLM.
+   - `yore mcp search-context` / `yore mcp fetch-context` for bounded JSON previews and explicit follow-up expansion.
+
+   Both paths reuse the same deterministic retrieval building blocks:
 
    - BM25 to select the most relevant documents and sections.
-   - Cross‑reference expansion to include linked ADRs and design docs.
+   - Cross‑reference expansion to include linked ADRs and design docs where appropriate.
    - Extractive refinement to keep code blocks, lists, and high‑value sentences while removing low‑signal prose.
-   - Final trimming to respect a token budget and a maximum section count.
-   - Markdown digest generation suitable for direct LLM input.
+   - Final budget-aware trimming for either markdown digests or compact JSON previews.
 
 4. **Evaluation and governance**
    The `yore eval` command uses a JSONL question file to validate whether the assembled contexts contain expected substrings, enabling regression detection and measurable improvements to retrieval quality.
@@ -190,7 +195,26 @@ yore assemble "How does authentication work?" \
   --index docs/.index > context.md
 ```
 
-You can then paste `context.md` directly into an LLM prompt.
+Use `assemble` when you intentionally want one markdown digest to hand to an LLM.
+
+For agent integrations and IDE/status-bar flows, prefer the bounded two-step MCP-oriented path first:
+
+```bash
+# Step 1: preview compact snippets and capture opaque handles
+yore mcp search-context "How does authentication work?" \
+  --max-results 5 \
+  --max-tokens 1200 \
+  --max-bytes 12000 \
+  --index docs/.index
+
+# Step 2: expand only the specific handle you need
+yore mcp fetch-context ctx_1234abcd \
+  --max-tokens 4000 \
+  --max-bytes 20000 \
+  --index docs/.index
+```
+
+That flow keeps transcript pressure low: search returns previews, source references, truncation metadata, and handles; fetch returns more detail only on explicit follow-up.
 
 ### 6.5 Evaluate retrieval quality
 
@@ -401,6 +425,207 @@ yore assemble "How does the authentication system work?" \
 # Assemble from explicit files
 yore assemble --from-files docs/adr/ADR-0010.md docs/adr/ADR-0011.md --index docs/.index
 yore assemble --from-files @file-list.txt --index docs/.index
+```
+
+---
+
+### 7.5A `yore mcp`
+
+Provides a bounded JSON-first contract for agent retrieval.
+
+```bash
+yore mcp search-context <query> --index <index-dir>
+yore mcp fetch-context <handle> --index <index-dir>
+```
+
+**Search/fetch contract**
+
+* `search-context` returns compact previews, source references, budget usage, truncation reasons, and opaque `ctx_...` handles.
+* `fetch-context` expands one handle at a time and applies its own token/byte caps before returning content.
+* Handles are stored under `<index-dir>/mcp_handles/` so a follow-up fetch can happen in a separate process.
+* Large artifacts stay off transcript by default; callers must opt into expansion explicitly.
+
+**Key options**
+
+* `search-context --max-results` – Hard top-k cap for preview hits (default: 5)
+* `search-context --max-tokens` – Hard total token cap across previews (default: 1200)
+* `search-context --max-bytes` – Hard total byte cap across previews (default: 12000)
+* `search-context --from-files` – Preview from an explicit file list instead of a query
+* `fetch-context --max-tokens` – Hard token cap for fetched content (default: 4000)
+* `fetch-context --max-bytes` – Hard byte cap for fetched content (default: 20000)
+
+**Examples**
+
+```bash
+# Preview top bounded hits for an agent
+yore mcp search-context "session revocation flow" --index docs/.index
+
+# Selection-first preview for an IDE action or changed-file workflow
+yore mcp search-context --from-files docs/auth.md docs/adr/ADR-0012.md --index docs/.index
+
+# Expand one result only when you actually need it
+yore mcp fetch-context ctx_1234abcd --index docs/.index
+```
+
+Use this flow when transcript discipline matters: status bars, editor copilots, thin MCP servers, or any agent loop where a raw markdown dump would be too expensive.
+
+**Integration Contract v1**
+
+* `schema_version: 1` is the contract anchor.
+* While `schema_version` remains `1`, existing field names and meanings are stable.
+* Additive fields may appear in v1, but existing fields will not be renamed or repurposed.
+* Any breaking change to payload shape or semantics requires a schema version bump.
+
+**Recommended defaults**
+
+* `search-context --max-results 5`
+* `search-context --max-tokens 1200`
+* `search-context --max-bytes 12000`
+* `fetch-context --max-tokens 4000`
+* `fetch-context --max-bytes 20000`
+
+**Stable top-level fields**
+
+* `search-context`: `schema_version`, `tool`, `query`, `selection_mode`, `budget`, `pressure`, `results`, `error`, `message`, `missing_files`
+* `fetch-context`: `schema_version`, `tool`, `handle`, `budget`, `pressure`, `query`, `result`, `error`, `message`
+
+**Stable nested fields**
+
+* `budget.max_results`, `budget.max_tokens`, `budget.max_bytes`, `budget.returned_results`, `budget.candidate_hits`, `budget.deduped_hits`, `budget.omitted_hits`, `budget.estimated_tokens`, `budget.bytes`
+* `pressure.truncated`, `pressure.reasons`
+* `results[].handle`, `results[].rank`, `results[].source.path`, `results[].source.heading`, `results[].source.line_start`, `results[].source.line_end`
+* `results[].scores.bm25`, `results[].scores.canonicality`, `results[].scores.combined`
+* `results[].preview`, `results[].preview_tokens`, `results[].preview_bytes`, `results[].truncated`, `results[].truncation_reasons`
+* `result.source.path`, `result.source.heading`, `result.source.line_start`, `result.source.line_end`
+* `result.scores.bm25`, `result.scores.canonicality`, `result.scores.combined`
+* `result.preview`, `result.content`, `result.content_tokens`, `result.content_bytes`
+
+**Semantics**
+
+* `candidate_hits` counts raw section candidates before dedupe.
+* `deduped_hits` counts candidates removed because they overlapped an already selected section or had duplicate normalized content.
+* `omitted_hits` counts relevant deduped hits that were not returned because of caps.
+* `pressure.truncated` means the overall response hit a cap or included at least one truncated payload.
+* `pressure.reasons` reports response-level pressure using `result_cap`, `token_cap`, and `byte_cap`.
+* `results[].truncated` and `results[].truncation_reasons` report truncation for an individual preview.
+* `results[].handle` is an opaque handle stored under `<index-dir>/mcp_handles/`; callers should treat it as opaque and use `fetch-context` rather than reading artifact files directly.
+* Handles are deterministic for a fixed query, source path, section span, and section content.
+
+**Smoke test**
+
+The checked-in fixture corpus lives under `tests/fixtures/mcp-smoke/docs/` and is indexed by default because Yore includes `txt` in its default types. Run this exact command in CI or locally:
+
+```bash
+bash scripts/mcp-smoke-test.sh
+```
+
+That script:
+
+* copies the fixture corpus into a temp workspace
+* builds an index
+* runs `search-context`
+* extracts the returned `ctx_...` handle
+* runs `fetch-context`
+* asserts the expected contract shape, truncation signal, and handle expansion
+
+**Fixture-backed example**
+
+```bash
+yore mcp search-context authentication \
+  --max-results 3 \
+  --max-tokens 120 \
+  --max-bytes 600 \
+  --index .yore-smoke
+```
+
+```json
+{
+  "schema_version": 1,
+  "tool": "search_context",
+  "query": "authentication",
+  "selection_mode": "query",
+  "budget": {
+    "max_results": 3,
+    "max_tokens": 120,
+    "max_bytes": 600,
+    "returned_results": 1,
+    "candidate_hits": 2,
+    "deduped_hits": 1,
+    "omitted_hits": 0,
+    "estimated_tokens": 40,
+    "bytes": 160
+  },
+  "pressure": {
+    "truncated": false
+  },
+  "results": [
+    {
+      "handle": "ctx_d76396f763601873",
+      "rank": 1,
+      "source": {
+        "path": "docs/aa-auth.txt",
+        "heading": "Authentication Overview",
+        "line_start": 1,
+        "line_end": 11
+      },
+      "scores": {
+        "bm25": 0.19397590361445782,
+        "canonicality": 0.5,
+        "combined": 0.28578313253012044
+      },
+      "preview": "# Authentication Overview\n\nAuthentication flow validates credentials against the identity store and issues a session token\n\nAuthentication step 1 keeps the audi",
+      "preview_tokens": 40,
+      "preview_bytes": 160,
+      "truncated": false
+    }
+  ]
+}
+```
+
+```bash
+yore mcp fetch-context ctx_d76396f763601873 \
+  --max-tokens 40 \
+  --max-bytes 220 \
+  --index .yore-smoke
+```
+
+```json
+{
+  "schema_version": 1,
+  "tool": "fetch_context",
+  "handle": "ctx_d76396f763601873",
+  "budget": {
+    "max_tokens": 40,
+    "max_bytes": 220,
+    "estimated_tokens": 40,
+    "bytes": 160
+  },
+  "pressure": {
+    "truncated": true,
+    "reasons": [
+      "token_cap",
+      "byte_cap"
+    ]
+  },
+  "query": "authentication",
+  "result": {
+    "source": {
+      "path": "docs/aa-auth.txt",
+      "heading": "Authentication Overview",
+      "line_start": 1,
+      "line_end": 11
+    },
+    "scores": {
+      "bm25": 0.19397590361445785,
+      "canonicality": 0.5,
+      "combined": 0.28578313253012044
+    },
+    "preview": "# Authentication Overview\n\nAuthentication flow validates credentials against the identity store and issues a session token\n\nAuthentication step 1 keeps the audi",
+    "content": "# Authentication Overview\n\nAuthentication flow validates credentials against the identity store and issues a session token.\nEvery successful logi ...[truncated]",
+    "content_tokens": 40,
+    "content_bytes": 160
+  }
+}
 ```
 
 ---

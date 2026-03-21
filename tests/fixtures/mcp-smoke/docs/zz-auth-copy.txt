@@ -1,0 +1,11 @@
+# Authentication Overview
+
+Authentication flow validates credentials against the identity store and issues a session token.
+Every successful login records an audit event and includes the actor, scope, and timestamp.
+If validation fails, the service records a denial event and returns an access failure.
+
+Authentication step 1 keeps the audit trail consistent and explains why session revocation happens after suspicious activity.
+Authentication step 2 keeps the audit trail consistent and explains why session revocation happens after suspicious activity.
+Authentication step 3 keeps the audit trail consistent and explains why session revocation happens after suspicious activity.
+Authentication step 4 keeps the audit trail consistent and explains why session revocation happens after suspicious activity.
+Authentication step 5 keeps the audit trail consistent and explains why session revocation happens after suspicious activity.
