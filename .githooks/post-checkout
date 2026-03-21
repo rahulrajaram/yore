@@ -1,0 +1,8 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+COMMITHOOKS_DIR="$(git rev-parse --git-dir)"
+source "$COMMITHOOKS_DIR/lib/common.sh"
+source "$COMMITHOOKS_DIR/lib/deps.sh"
+
+commithooks_reinstall_if_changed "${1:-ORIG_HEAD}" "${2:-HEAD}"
