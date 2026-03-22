@@ -1,6 +1,6 @@
 [package]
 name = "yore-cli"
-version = "0.4.0"
+version = "0.5.0"
 edition = "2021"
 description = "Fast document indexer for finding duplicates and searching content"
 license = "MIT"
