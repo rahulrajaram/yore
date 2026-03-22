@@ -7,6 +7,18 @@ fn main() {
     println!("cargo:rerun-if-changed=.githooks/pre-commit");
     println!("cargo:rerun-if-changed=.githooks/commit-msg");
     println!("cargo:rerun-if-env-changed=COMMITHOOKS_DIR");
+    println!("cargo:rerun-if-env-changed=YORE_INSTALL_GIT_HOOKS");
+
+    let install_hooks = matches!(
+        env::var("YORE_INSTALL_GIT_HOOKS")
+            .ok()
+            .as_deref()
+            .map(|value| value.trim().to_ascii_lowercase()),
+        Some(value) if matches!(value.as_str(), "1" | "true" | "yes")
+    );
+    if !install_hooks {
+        return;
+    }
 
     let manifest_dir = env::var("CARGO_MANIFEST_DIR").unwrap_or_default();
     if manifest_dir.is_empty() {

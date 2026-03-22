@@ -112,6 +112,7 @@ Yore operates in four main phases:
 
    - `yore assemble` for a markdown digest you want to hand directly to an LLM.
    - `yore mcp search-context` / `yore mcp fetch-context` for bounded JSON previews and explicit follow-up expansion.
+   - `yore mcp serve` to expose those same bounded tools over MCP stdio transport for editor and agent clients.
 
    Both paths reuse the same deterministic retrieval building blocks:
 
@@ -215,6 +216,14 @@ yore mcp fetch-context ctx_1234abcd \
 ```
 
 That flow keeps transcript pressure low: search returns previews, source references, truncation metadata, and handles; fetch returns more detail only on explicit follow-up.
+
+If you want a real MCP server process instead of shelling out to the CLI contract directly:
+
+```bash
+yore mcp serve --index docs/.index
+```
+
+That stdio server registers `search_context` and `fetch_context` as MCP tools and returns the same contract via `structuredContent`.
 
 ### 6.5 Evaluate retrieval quality
 
@@ -436,13 +445,15 @@ Provides a bounded JSON-first contract for agent retrieval.
 ```bash
 yore mcp search-context <query> --index <index-dir>
 yore mcp fetch-context <handle> --index <index-dir>
+yore mcp serve --index <index-dir>
 ```
 
 **Search/fetch contract**
 
 * `search-context` returns compact previews, source references, budget usage, truncation reasons, and opaque `ctx_...` handles.
 * `fetch-context` expands one handle at a time and applies its own token/byte caps before returning content.
-* Handles are stored under `<index-dir>/mcp_handles/` so a follow-up fetch can happen in a separate process.
+* `serve` exposes those same operations as MCP tools named `search_context` and `fetch_context` over stdio transport.
+* Handles are stored under `<index-dir>/mcp_handles/` when writable, with an automatic temp-dir fallback if the index directory is read-only.
 * Large artifacts stay off transcript by default; callers must opt into expansion explicitly.
 
 **Key options**
@@ -465,9 +476,14 @@ yore mcp search-context --from-files docs/auth.md docs/adr/ADR-0012.md --index d
 
 # Expand one result only when you actually need it
 yore mcp fetch-context ctx_1234abcd --index docs/.index
+
+# Serve the same contract over MCP stdio for editor/agent clients
+yore mcp serve --index docs/.index
 ```
 
 Use this flow when transcript discipline matters: status bars, editor copilots, thin MCP servers, or any agent loop where a raw markdown dump would be too expensive.
+
+For MCP clients, `yore mcp serve` returns the same search/fetch payloads inside `structuredContent`, and mirrors them as compact JSON text content for clients that only read text tool output.
 
 **Integration Contract v1**
 
@@ -508,7 +524,7 @@ Use this flow when transcript discipline matters: status bars, editor copilots, 
 * `pressure.truncated` means the overall response hit a cap or included at least one truncated payload.
 * `pressure.reasons` reports response-level pressure using `result_cap`, `token_cap`, and `byte_cap`.
 * `results[].truncated` and `results[].truncation_reasons` report truncation for an individual preview.
-* `results[].handle` is an opaque handle stored under `<index-dir>/mcp_handles/`; callers should treat it as opaque and use `fetch-context` rather than reading artifact files directly.
+* `results[].handle` is an opaque handle persisted under `<index-dir>/mcp_handles/` when possible, with a temp-dir fallback for read-only indexes; callers should treat it as opaque and use `fetch-context` rather than reading artifact files directly.
 * Handles are deterministic for a fixed query, source path, section span, and section content.
 
 **Smoke test**

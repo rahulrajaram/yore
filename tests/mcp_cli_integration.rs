@@ -2,6 +2,8 @@ use serde_json::Value;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+#[cfg(unix)]
+use std::{fs::Permissions, os::unix::fs::PermissionsExt};
 
 fn temp_dir(label: &str) -> PathBuf {
     let nanos = std::time::SystemTime::now()
@@ -165,4 +167,100 @@ fn test_mcp_fetch_context_expands_handle_with_truncation_metadata() {
         .as_str()
         .unwrap()
         .contains("[truncated]"));
+}
+
+#[test]
+fn test_mcp_search_context_works_from_different_cwd_after_relative_build() {
+    let root = temp_dir("cross-cwd");
+    write_docs(&root);
+    let index_dir = root.join(".yore-test");
+    build_index(&root, &index_dir);
+
+    let foreign_cwd = temp_dir("foreign-cwd");
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_yore"));
+    cmd.current_dir(&foreign_cwd)
+        .args(["mcp", "search-context", "authentication", "--index"])
+        .arg(&index_dir);
+    let (ok, stdout) = run_cmd(cmd);
+    assert!(ok, "cross-cwd search-context failed: {}", stdout);
+
+    let value: Value = serde_json::from_str(stdout.trim()).unwrap();
+    assert!(value["error"].is_null());
+    assert_eq!(value["results"][0]["source"]["path"], "docs/aa-auth.md");
+}
+
+#[cfg(unix)]
+#[test]
+fn test_mcp_search_context_falls_back_when_index_dir_is_read_only() {
+    let root = temp_dir("readonly-index");
+    write_docs(&root);
+    let index_dir = root.join(".yore-test");
+    build_index(&root, &index_dir);
+
+    fs::set_permissions(&index_dir, Permissions::from_mode(0o555)).unwrap();
+
+    let search = search_context(
+        &root,
+        &index_dir,
+        &[
+            "--max-results",
+            "1",
+            "--max-tokens",
+            "120",
+            "--max-bytes",
+            "500",
+        ],
+    );
+
+    assert!(search["error"].is_null());
+    let handle = search["results"][0]["handle"].as_str().unwrap().to_string();
+
+    let mut fetch = Command::new(env!("CARGO_BIN_EXE_yore"));
+    fetch
+        .current_dir(&root)
+        .args(["mcp", "fetch-context", &handle, "--index"])
+        .arg(&index_dir);
+    let (ok, stdout) = run_cmd(fetch);
+    assert!(
+        ok,
+        "fetch-context failed after read-only search: {}",
+        stdout
+    );
+
+    let value: Value = serde_json::from_str(stdout.trim()).unwrap();
+    assert!(value["error"].is_null());
+    assert_eq!(value["handle"], handle);
+}
+
+#[test]
+fn test_mcp_search_context_reports_preview_truncation_metadata() {
+    let root = temp_dir("preview-truncation");
+    write_docs(&root);
+    let index_dir = root.join(".yore-test");
+    build_index(&root, &index_dir);
+
+    let value = search_context(
+        &root,
+        &index_dir,
+        &[
+            "--max-results",
+            "1",
+            "--max-tokens",
+            "40",
+            "--max-bytes",
+            "500",
+        ],
+    );
+
+    let result = &value["results"][0];
+    assert!(result["truncated"].as_bool().unwrap());
+    assert!(value["pressure"]["truncated"].as_bool().unwrap());
+    assert!(result["preview"].as_str().unwrap().contains("[truncated]"));
+    let reasons = result["truncation_reasons"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|value| value.as_str())
+        .collect::<Vec<_>>();
+    assert!(reasons.contains(&"token_cap"));
 }

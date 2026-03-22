@@ -3,10 +3,11 @@
 ## Project: Yore MCP for bounded documentation context
 
 ## Session status
-- The repository is currently at `b970943` on `master`.
-- No MCP implementation exists in the codebase yet.
-- This session validated the target product shape from the `gptqueue` message sent by `amoebum-codex-shell`.
-- Root planning docs have been updated to reflect the MCP effort as the next active track.
+- The repository is on `master` with the hardened bounded preview/fetch CLI committed.
+- `yore mcp search-context` and `yore mcp fetch-context` are implemented in the CLI and covered by integration tests.
+- This session hardened cwd-independent document resolution, read-only-safe MCP handle storage, preview truncation reporting, and opt-in hook installation.
+- The next priority is a thin MCP server or wrapper layer so Amoebum can call the existing preview/fetch contract without shell-specific glue.
+- Remaining roadmap gaps after that are diff-aware selection and deeper client integration notes.
 
 ## Validated objective
 Build Yore into a bounded documentation/context MCP for agent workflows, especially Amoebum, without turning it into a broad file-dumping tool.
@@ -25,19 +26,23 @@ Existing functionality already provides useful building blocks:
 - ranked section retrieval through `query`;
 - token-budgeted context assembly through `assemble`;
 - explicit file selection through `assemble --from-files`;
+- bounded preview/fetch retrieval through `yore mcp search-context` and `yore mcp fetch-context`;
+- source-root metadata for portable index reads across working directories;
+- filesystem-backed MCP handle persistence with read-only-safe fallback storage;
 - related structural tools such as `similar`, `backlinks`, `canonicality`, and graph export.
 
 Important constraints from the current code:
 - `assemble` currently emits markdown only;
-- the public surface is CLI-first, not MCP-first;
-- current examples still assume writing assembled context directly into prompt text;
-- there is no opaque handle store, byte-budget contract, or explicit preview/fetch split yet.
+- the public surface is still CLI-first, not a standalone MCP server;
+- byte and token budgeting remain approximate at the transport boundary;
+- current MCP handle storage is local-filesystem-based rather than session/service managed;
+- the code is still concentrated in `src/main.rs`.
 
 ## Priority tranches
 
 ### Tranche M1 - MCP contract and response schema
 **Priority:** high  
-**Status:** not started
+**Status:** implemented in CLI
 
 Define the initial MCP-facing surface and data contracts.
 
@@ -62,7 +67,7 @@ Acceptance criteria:
 
 ### Tranche M2 - Search and preview path
 **Priority:** high  
-**Status:** not started
+**Status:** implemented and hardened
 
 Implement the bounded first-step retrieval flow.
 
@@ -81,7 +86,7 @@ Acceptance criteria:
 
 ### Tranche M3 - Explicit expansion and opaque handles
 **Priority:** high  
-**Status:** not started
+**Status:** implemented and hardened
 
 Add the second-step expansion path for callers that explicitly ask for more detail.
 
@@ -96,7 +101,7 @@ Acceptance criteria:
 
 ### Tranche M4 - Pressure signals and diff-aware selection
 **Priority:** medium  
-**Status:** not started
+**Status:** partially implemented
 
 Make the interface safe for IDE and status-bar usage.
 
@@ -115,7 +120,7 @@ Acceptance criteria:
 
 ### Tranche M5 - Tests, docs, and Amoebum integration notes
 **Priority:** medium  
-**Status:** not started
+**Status:** partially implemented
 
 Document and verify the MCP surface.
 
@@ -128,21 +133,54 @@ Acceptance criteria:
 - Tests cover the two-step retrieval contract.
 - Docs explain bounded usage and transcript-discipline expectations.
 
+### Tranche M6 - Thin MCP server or wrapper layer
+**Priority:** high  
+**Status:** next
+
+Expose the existing bounded preview/fetch contract through an actual MCP-facing process.
+
+Deliverables:
+- Decide whether the first server shape is:
+  - a dedicated `yore-mcp` binary, or
+  - a `yore mcp serve` subcommand wrapping existing retrieval helpers.
+- Reuse the existing `search_context` and `fetch_context` schemas instead of inventing a second contract.
+- Implement MCP tool registration and request/response handling for the bounded preview/fetch flow.
+- Keep the server layer thin: delegate retrieval, truncation, dedupe, and handle storage to existing Rust helpers.
+
+Acceptance criteria:
+- Amoebum can invoke Yore over MCP transport without scraping CLI stdout conventions.
+- The wrapper preserves the existing bounded preview/fetch semantics and budget defaults.
+- CLI usage remains stable for current users.
+
 ## Suggested execution order
 1. M1 contract and schema
 2. M2 search and preview path
 3. M3 explicit expansion and opaque handles
-4. M4 pressure signals and diff-aware selection
-5. M5 tests and docs
+4. M6 thin MCP server or wrapper layer
+5. M4 pressure signals and diff-aware selection
+6. M5 tests and docs
 
 ## Risks and open questions
 - The current code is concentrated in `src/main.rs`, so the MCP work may be easier if we first extract reusable retrieval helpers rather than layering more logic directly into command handlers.
-- We need to choose whether opaque handles are purely in-memory session identifiers or persisted artifacts with cleanup rules.
+- We still need to decide whether long-term opaque handles should stay local-filesystem-based or move to a more explicit session model.
 - We should decide early whether byte budgeting is approximate or exact at the transport boundary.
-- README examples currently promote direct `context.md` prompt injection and should be revised once the MCP flow exists.
+- We still need to define the server packaging choice: dedicated binary versus `yore mcp serve`.
 
 ## First commands for the next shell
 - `git status --short`
-- `rg -n "Assemble|cmd_assemble|query|from_files" src/main.rs README.md`
-- `sed -n '469,520p' src/main.rs`
-- `sed -n '6128,6260p' src/main.rs`
+- `cargo test`
+- `cargo clippy --all-targets --all-features -- -D warnings`
+- `rg -n "search_context|fetch_context|source_root|artifact_store_unavailable|RefinedSection|YORE_INSTALL_GIT_HOOKS" src/main.rs build.rs tests README.md`
+## Next Work Tranches
+
+1. NXT-008 `Implement a thin MCP server or wrapper layer over yore search-context and fetch-context for Amoebum.`: incomplete. tranche_group=next-todos
+    Scope:
+    1. Choose the first server shape: dedicated binary or `yore mcp serve`.
+    2. Reuse the existing bounded preview/fetch contract instead of defining a second schema.
+    3. Keep CLI behavior stable while exposing the same tools over MCP transport.
+    Exit criteria:
+    1. Amoebum can call Yore through MCP transport for preview and fetch.
+    2. Focused tests cover the server or wrapper flow without regressing the current CLI path.
+
+Operator policy while queue is non-empty:
+- Keep IMPLEMENTATION_PLAN.md and .yarli/tranches.toml synchronized after each planning change.
