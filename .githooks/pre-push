@@ -1,0 +1,9 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+COMMITHOOKS_DIR="$(git rev-parse --git-dir)"
+source "$COMMITHOOKS_DIR/lib/common.sh"
+source "$COMMITHOOKS_DIR/lib/pre-push.sh"
+
+commithooks_reject_wip_commits "$@"
+commithooks_check_branch_name

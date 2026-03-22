@@ -521,6 +521,23 @@ enum Commands {
         index: PathBuf,
     },
 
+    /// Experimental MCP-oriented context tools with bounded preview/fetch contracts.
+    ///
+    /// This surface is JSON-first and intentionally narrow: search/preview
+    /// returns compact snippets plus opaque handles, and fetch returns more
+    /// detail only when explicitly asked.
+    ///
+    /// Related:
+    ///   - `yore query`, `yore assemble`
+    ///
+    /// Examples:
+    ///   yore mcp search-context "authentication flow" --index .yore
+    ///   yore mcp fetch-context ctx_1234abcd --index .yore
+    Mcp {
+        #[command(subcommand)]
+        command: McpCommands,
+    },
+
     /// Evaluate the retrieval pipeline against test questions.
     ///
     /// Given a JSONL questions file with expected substrings, runs the
@@ -1027,6 +1044,69 @@ enum Commands {
     },
 }
 
+#[derive(Subcommand)]
+enum McpCommands {
+    /// Return bounded previews plus opaque handles for follow-up fetches.
+    #[command(name = "search-context", alias = "preview-context")]
+    SearchContext {
+        /// Natural language query/question (required unless --from-files is used)
+        #[arg(required_unless_present = "from_files")]
+        query: Vec<String>,
+
+        /// Maximum preview results to return
+        #[arg(long, default_value = "5")]
+        max_results: usize,
+
+        /// Maximum total tokens across all previews (approximate)
+        #[arg(long, default_value = "1200")]
+        max_tokens: usize,
+
+        /// Maximum total bytes across all previews
+        #[arg(long, default_value = "12000")]
+        max_bytes: usize,
+
+        /// Search/preview from explicit files instead of a query (supports @list.txt)
+        #[arg(long, value_name = "PATH", num_args = 1..)]
+        from_files: Vec<String>,
+
+        /// Index directory
+        #[arg(short, long, default_value = ".yore")]
+        index: PathBuf,
+    },
+
+    /// Expand a previously returned opaque handle.
+    #[command(name = "fetch-context", alias = "expand-context")]
+    FetchContext {
+        /// Opaque handle returned by `search-context`
+        handle: String,
+
+        /// Maximum tokens in fetched content (approximate)
+        #[arg(long, default_value = "4000")]
+        max_tokens: usize,
+
+        /// Maximum bytes in fetched content
+        #[arg(long, default_value = "20000")]
+        max_bytes: usize,
+
+        /// Index directory
+        #[arg(short, long, default_value = ".yore")]
+        index: PathBuf,
+    },
+
+    /// Serve the bounded preview/fetch tools over MCP stdio transport.
+    ///
+    /// This wraps the existing `search_context` and `fetch_context`
+    /// contracts so MCP clients can call Yore without scraping CLI stdout.
+    ///
+    /// Examples:
+    ///   yore mcp serve --index .yore
+    Serve {
+        /// Default index directory for MCP tool calls
+        #[arg(short, long, default_value = ".yore")]
+        index: PathBuf,
+    },
+}
+
 // Evaluation structures
 #[derive(Serialize, Deserialize, Debug, Clone)]
 struct Question {
@@ -1177,6 +1257,202 @@ struct VocabularyOptions<'a> {
     include_stemming: bool,
     no_default_stopwords: bool,
     common_terms: usize,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+struct McpScoreBreakdown {
+    bm25: f64,
+    canonicality: f64,
+    combined: f64,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+struct McpSourceRef {
+    path: String,
+    heading: String,
+    line_start: usize,
+    line_end: usize,
+}
+
+#[derive(Serialize, Debug, Default, Clone)]
+struct McpPressure {
+    truncated: bool,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    reasons: Vec<String>,
+}
+
+#[derive(Serialize, Debug, Default)]
+struct McpSearchBudget {
+    max_results: usize,
+    max_tokens: usize,
+    max_bytes: usize,
+    returned_results: usize,
+    candidate_hits: usize,
+    deduped_hits: usize,
+    omitted_hits: usize,
+    estimated_tokens: usize,
+    bytes: usize,
+}
+
+#[derive(Serialize, Debug, Default)]
+struct McpFetchBudget {
+    max_tokens: usize,
+    max_bytes: usize,
+    estimated_tokens: usize,
+    bytes: usize,
+}
+
+#[derive(Serialize, Debug)]
+struct McpSearchResult {
+    handle: String,
+    rank: usize,
+    source: McpSourceRef,
+    scores: McpScoreBreakdown,
+    preview: String,
+    preview_tokens: usize,
+    preview_bytes: usize,
+    truncated: bool,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    truncation_reasons: Vec<String>,
+}
+
+#[derive(Serialize, Debug)]
+struct McpFetchResult {
+    source: McpSourceRef,
+    scores: McpScoreBreakdown,
+    preview: String,
+    content: String,
+    content_tokens: usize,
+    content_bytes: usize,
+}
+
+#[derive(Serialize, Debug)]
+struct McpSearchResponse {
+    schema_version: u32,
+    tool: String,
+    query: String,
+    selection_mode: String,
+    budget: McpSearchBudget,
+    pressure: McpPressure,
+    results: Vec<McpSearchResult>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    message: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    missing_files: Vec<String>,
+}
+
+#[derive(Serialize, Debug)]
+struct McpFetchResponse {
+    schema_version: u32,
+    tool: String,
+    handle: String,
+    budget: McpFetchBudget,
+    pressure: McpPressure,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    query: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    result: Option<McpFetchResult>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    message: Option<String>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+struct McpArtifact {
+    schema_version: u32,
+    handle: String,
+    query: String,
+    source: McpSourceRef,
+    scores: McpScoreBreakdown,
+    preview: String,
+    content: String,
+    created_at: String,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct McpSearchOptions {
+    max_results: usize,
+    max_tokens: usize,
+    max_bytes: usize,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct McpFetchOptions {
+    max_tokens: usize,
+    max_bytes: usize,
+}
+
+const DEFAULT_MCP_PROTOCOL_VERSION: &str = "2025-11-25";
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+struct McpInitializeParams {
+    protocol_version: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct JsonRpcRequest {
+    #[serde(default)]
+    jsonrpc: Option<String>,
+    #[serde(default)]
+    id: Option<serde_json::Value>,
+    method: String,
+    #[serde(default)]
+    params: serde_json::Value,
+}
+
+#[derive(Debug, Deserialize)]
+struct McpToolCallParams {
+    name: String,
+    #[serde(default)]
+    arguments: serde_json::Value,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(default)]
+struct McpSearchToolArgs {
+    query: String,
+    from_files: Vec<String>,
+    max_results: usize,
+    max_tokens: usize,
+    max_bytes: usize,
+    index: Option<PathBuf>,
+}
+
+impl Default for McpSearchToolArgs {
+    fn default() -> Self {
+        Self {
+            query: String::new(),
+            from_files: Vec::new(),
+            max_results: 5,
+            max_tokens: 1200,
+            max_bytes: 12000,
+            index: None,
+        }
+    }
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(default)]
+struct McpFetchToolArgs {
+    handle: String,
+    max_tokens: usize,
+    max_bytes: usize,
+    index: Option<PathBuf>,
+}
+
+impl Default for McpFetchToolArgs {
+    fn default() -> Self {
+        Self {
+            handle: String::new(),
+            max_tokens: 4000,
+            max_bytes: 20000,
+            index: None,
+        }
+    }
 }
 
 // Mv output structure
@@ -1503,6 +1779,8 @@ struct ForwardIndex {
     files: HashMap<String, FileEntry>,
     indexed_at: String,
     version: u32, // index version for compatibility
+    #[serde(default)]
+    source_root: String,
     #[serde(default)]
     avg_doc_length: f64, // NEW: average document length for BM25
     #[serde(default)]
@@ -1932,6 +2210,39 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             },
             &index,
         ),
+        Commands::Mcp { command } => match command {
+            McpCommands::SearchContext {
+                query,
+                max_results,
+                max_tokens,
+                max_bytes,
+                from_files,
+                index,
+            } => cmd_mcp_search_context(
+                &query.join(" "),
+                &from_files,
+                &index,
+                McpSearchOptions {
+                    max_results,
+                    max_tokens,
+                    max_bytes,
+                },
+            ),
+            McpCommands::FetchContext {
+                handle,
+                max_tokens,
+                max_bytes,
+                index,
+            } => cmd_mcp_fetch_context(
+                &handle,
+                &index,
+                McpFetchOptions {
+                    max_tokens,
+                    max_bytes,
+                },
+            ),
+            McpCommands::Serve { index } => cmd_mcp_serve(&index),
+        },
         Commands::Eval {
             questions,
             index,
@@ -2061,6 +2372,7 @@ fn cmd_build(
     track_renames: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let start = Instant::now();
+    let source_root = canonicalize_existing_path(&std::env::current_dir()?);
 
     if !quiet && !json {
         println!("{} {}", "Indexing".cyan().bold(), path.display());
@@ -2082,7 +2394,8 @@ fn cmd_build(
     let mut forward_index = ForwardIndex {
         files: HashMap::new(),
         indexed_at: chrono_now(),
-        version: 3, // Version 3 includes BM25 (term_frequencies, idf_map) and MinHash
+        version: 4, // Version 4 adds source_root metadata for portable file resolution
+        source_root: source_root.to_string_lossy().to_string(),
         avg_doc_length: 0.0,
         idf_map: HashMap::new(),
     };
@@ -2141,12 +2454,10 @@ fn cmd_build(
         }
 
         // Index the file
-        if let Ok(entry) = index_file(path) {
-            let rel_path = path
-                .strip_prefix(std::env::current_dir()?)
-                .unwrap_or(path)
-                .to_string_lossy()
-                .to_string();
+        if let Ok(mut entry) = index_file(path) {
+            let physical_path = canonicalize_existing_path(path);
+            let rel_path = build_indexed_doc_key(&physical_path, &source_root);
+            entry.path = physical_path.to_string_lossy().to_string();
 
             // Update reverse index with heading keywords
             for keyword in &entry.keywords {
@@ -4828,6 +5139,310 @@ struct SectionMatch {
     canonicality: f64,
 }
 
+const MCP_SCHEMA_VERSION: u32 = 1;
+
+#[derive(Debug, Clone)]
+struct ContextSelection {
+    query_label: String,
+    query_for_refiner: String,
+    sections: Vec<SectionMatch>,
+}
+
+#[derive(Debug, Clone)]
+enum ContextSelectionIssue {
+    NoSearchableTerms,
+    MissingFiles(Vec<String>),
+    NoIndexedFilesMatched,
+    NoRelevantSections(String),
+}
+
+#[derive(Debug, Clone)]
+struct RefinedSection {
+    section: SectionMatch,
+    truncated: bool,
+    truncation_reasons: Vec<String>,
+}
+
+fn combined_section_score(section: &SectionMatch) -> f64 {
+    section.bm25_score * 0.7 + section.canonicality * 0.3
+}
+
+fn compare_sections_by_relevance(a: &SectionMatch, b: &SectionMatch) -> std::cmp::Ordering {
+    combined_section_score(b)
+        .partial_cmp(&combined_section_score(a))
+        .unwrap_or(std::cmp::Ordering::Equal)
+        .then_with(|| a.doc_path.cmp(&b.doc_path))
+        .then_with(|| a.line_start.cmp(&b.line_start))
+        .then_with(|| a.line_end.cmp(&b.line_end))
+        .then_with(|| a.heading.cmp(&b.heading))
+}
+
+fn normalize_content_for_dedupe(text: &str) -> String {
+    text.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+fn forward_index_source_root(index: &ForwardIndex) -> Option<PathBuf> {
+    let trimmed = index.source_root.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(PathBuf::from(trimmed))
+    }
+}
+
+fn canonicalize_existing_path(path: &Path) -> PathBuf {
+    fs::canonicalize(path).unwrap_or_else(|_| {
+        if path.is_absolute() {
+            path.to_path_buf()
+        } else if let Ok(cwd) = std::env::current_dir() {
+            cwd.join(path)
+        } else {
+            path.to_path_buf()
+        }
+    })
+}
+
+fn build_indexed_doc_key(path: &Path, source_root: &Path) -> String {
+    if let Ok(stripped) = path.strip_prefix(source_root) {
+        let normalized = normalize_path(stripped);
+        if !normalized.is_empty() {
+            return normalized;
+        }
+    }
+
+    let normalized = normalize_path(path);
+    if !normalized.is_empty() {
+        normalized
+    } else {
+        path.to_string_lossy().to_string()
+    }
+}
+
+fn resolve_doc_fs_path(index: &ForwardIndex, doc_path: &str, entry: &FileEntry) -> PathBuf {
+    let stored_path = Path::new(&entry.path);
+    if stored_path.is_absolute() {
+        return stored_path.to_path_buf();
+    }
+
+    if let Some(source_root) = forward_index_source_root(index) {
+        let stored_candidate = source_root.join(stored_path);
+        if stored_candidate.exists() {
+            return stored_candidate;
+        }
+
+        let doc_candidate = source_root.join(doc_path);
+        if doc_candidate.exists() {
+            return doc_candidate;
+        }
+    }
+
+    PathBuf::from(doc_path)
+}
+
+fn read_indexed_doc(
+    index: &ForwardIndex,
+    doc_path: &str,
+    entry: &FileEntry,
+) -> Result<String, io::Error> {
+    fs::read_to_string(resolve_doc_fs_path(index, doc_path, entry))
+}
+
+fn dedupe_section_matches(sections: Vec<SectionMatch>) -> (Vec<SectionMatch>, usize) {
+    let mut unique: Vec<SectionMatch> = Vec::new();
+    let mut seen_content = HashSet::new();
+    let mut deduped_hits = 0usize;
+
+    for section in sections {
+        let overlaps_existing = unique.iter().any(|existing| {
+            existing.doc_path == section.doc_path
+                && existing.line_start <= section.line_end
+                && section.line_start <= existing.line_end
+        });
+
+        let content_key = normalize_content_for_dedupe(&section.content);
+        let duplicate_content = !content_key.is_empty() && !seen_content.insert(content_key);
+
+        if overlaps_existing || duplicate_content {
+            deduped_hits += 1;
+            continue;
+        }
+
+        unique.push(section);
+    }
+
+    (unique, deduped_hits)
+}
+
+fn floor_char_boundary(text: &str, limit: usize) -> usize {
+    let mut idx = limit.min(text.len());
+    while idx > 0 && !text.is_char_boundary(idx) {
+        idx -= 1;
+    }
+    idx
+}
+
+fn truncate_text_to_budget(
+    text: &str,
+    max_tokens: usize,
+    max_bytes: usize,
+) -> (String, bool, Vec<String>) {
+    const TRUNCATION_MARKER: &str = " ...[truncated]";
+
+    let mut reasons = Vec::new();
+    let mut limit = text.len();
+
+    let token_char_limit = max_tokens.saturating_mul(4);
+    if token_char_limit > 0 && text.len() > token_char_limit {
+        reasons.push("token_cap".to_string());
+        limit = limit.min(token_char_limit);
+    }
+
+    if max_bytes > 0 && text.len() > max_bytes {
+        reasons.push("byte_cap".to_string());
+        limit = limit.min(max_bytes);
+    }
+
+    if reasons.is_empty() {
+        return (text.to_string(), false, reasons);
+    }
+
+    let marker_len = TRUNCATION_MARKER.len();
+    let mut marker_budget = usize::MAX;
+    if token_char_limit > 0 {
+        marker_budget = marker_budget.min(token_char_limit);
+    }
+    if max_bytes > marker_len {
+        marker_budget = marker_budget.min(max_bytes);
+    }
+
+    if marker_budget > marker_len {
+        limit = limit.min(marker_budget.saturating_sub(marker_len));
+    }
+    let boundary = floor_char_boundary(text, limit);
+    let mut truncated = text[..boundary].trim_end().to_string();
+
+    if marker_budget > marker_len && truncated.len() + marker_len <= marker_budget {
+        truncated.push_str(TRUNCATION_MARKER);
+    }
+
+    (truncated, true, reasons)
+}
+
+fn mcp_handle_dir(index_dir: &Path) -> PathBuf {
+    index_dir.join("mcp_handles")
+}
+
+fn build_mcp_store_namespace(index_dir: &Path) -> String {
+    const FNV_OFFSET_BASIS: u64 = 14_695_981_039_346_656_037;
+    let canonical = canonicalize_existing_path(index_dir);
+    let mut state = FNV_OFFSET_BASIS;
+    stable_mcp_hash_update(&mut state, canonical.to_string_lossy().as_bytes());
+    format!("{:016x}", state)
+}
+
+fn fallback_mcp_handle_dir(index_dir: &Path) -> PathBuf {
+    std::env::temp_dir()
+        .join("yore")
+        .join("mcp_handles")
+        .join(build_mcp_store_namespace(index_dir))
+}
+
+fn candidate_mcp_handle_dirs(index_dir: &Path) -> Vec<PathBuf> {
+    vec![
+        mcp_handle_dir(index_dir),
+        fallback_mcp_handle_dir(index_dir),
+    ]
+}
+
+fn stable_mcp_hash_update(state: &mut u64, bytes: &[u8]) {
+    const FNV_PRIME: u64 = 1_099_511_628_211;
+
+    for byte in bytes {
+        *state ^= u64::from(*byte);
+        *state = state.wrapping_mul(FNV_PRIME);
+    }
+}
+
+fn build_mcp_handle(query: &str, section: &SectionMatch) -> String {
+    const FNV_OFFSET_BASIS: u64 = 14_695_981_039_346_656_037;
+    let mut state = FNV_OFFSET_BASIS;
+
+    stable_mcp_hash_update(&mut state, query.as_bytes());
+    stable_mcp_hash_update(&mut state, &[0xff]);
+    stable_mcp_hash_update(&mut state, section.doc_path.as_bytes());
+    stable_mcp_hash_update(&mut state, &[0xff]);
+    stable_mcp_hash_update(&mut state, section.heading.as_bytes());
+    stable_mcp_hash_update(&mut state, &[0xff]);
+    stable_mcp_hash_update(&mut state, &section.line_start.to_le_bytes());
+    stable_mcp_hash_update(&mut state, &[0xff]);
+    stable_mcp_hash_update(&mut state, &section.line_end.to_le_bytes());
+    stable_mcp_hash_update(&mut state, &[0xff]);
+    stable_mcp_hash_update(&mut state, section.content.as_bytes());
+
+    format!("ctx_{:016x}", state)
+}
+
+fn build_mcp_source_ref(section: &SectionMatch) -> McpSourceRef {
+    McpSourceRef {
+        path: section.doc_path.clone(),
+        heading: section.heading.clone(),
+        line_start: section.line_start,
+        line_end: section.line_end,
+    }
+}
+
+fn store_mcp_artifact(
+    index_dir: &Path,
+    artifact: &McpArtifact,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let payload = serde_json::to_vec_pretty(artifact)?;
+    let mut last_error: Option<io::Error> = None;
+
+    for handle_dir in candidate_mcp_handle_dirs(index_dir) {
+        match fs::create_dir_all(&handle_dir) {
+            Ok(_) => {}
+            Err(err) => {
+                last_error = Some(err);
+                continue;
+            }
+        }
+
+        let handle_path = handle_dir.join(format!("{}.json", artifact.handle));
+        match fs::write(handle_path, &payload) {
+            Ok(_) => return Ok(()),
+            Err(err) => {
+                last_error = Some(err);
+            }
+        }
+    }
+
+    Err(last_error
+        .unwrap_or_else(|| io::Error::other("unable to store MCP artifact"))
+        .into())
+}
+
+fn load_mcp_artifact(
+    index_dir: &Path,
+    handle: &str,
+) -> Result<McpArtifact, Box<dyn std::error::Error>> {
+    let mut last_error: Option<io::Error> = None;
+
+    for handle_dir in candidate_mcp_handle_dirs(index_dir) {
+        let handle_path = handle_dir.join(format!("{}.json", handle));
+        match fs::read_to_string(&handle_path) {
+            Ok(content) => return Ok(serde_json::from_str(&content)?),
+            Err(err) if err.kind() == io::ErrorKind::NotFound => {
+                last_error = Some(err);
+            }
+            Err(err) => return Err(err.into()),
+        }
+    }
+
+    Err(last_error
+        .unwrap_or_else(|| io::Error::new(io::ErrorKind::NotFound, "unknown handle"))
+        .into())
+}
+
 // Cross-reference expansion (Phase 2.2)
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -4885,11 +5500,11 @@ fn search_relevant_sections(
 
         // Split document into sections based on section_fingerprints
         if !entry.section_fingerprints.is_empty() {
-            // Use indexed sections
-            for section in &entry.section_fingerprints {
-                // Read the actual section content
-                if let Ok(content) = fs::read_to_string(doc_path) {
-                    let lines: Vec<&str> = content.lines().collect();
+            if let Ok(content) = read_indexed_doc(index, doc_path, entry) {
+                let lines: Vec<&str> = content.lines().collect();
+
+                // Use indexed sections
+                for section in &entry.section_fingerprints {
                     let start = section.line_start.saturating_sub(1);
                     let end = section.line_end.min(lines.len());
 
@@ -4910,7 +5525,7 @@ fn search_relevant_sections(
             }
         } else {
             // Fallback: treat whole doc as one section
-            if let Ok(content) = fs::read_to_string(doc_path) {
+            if let Ok(content) = read_indexed_doc(index, doc_path, entry) {
                 all_sections.push(SectionMatch {
                     doc_path: doc_path.to_string(),
                     heading: "Full Document".to_string(),
@@ -4924,14 +5539,8 @@ fn search_relevant_sections(
         }
     }
 
-    // Sort by combined score: BM25 * 0.7 + canonicality * 0.3
-    all_sections.sort_by(|a, b| {
-        let score_a = a.bm25_score * 0.7 + a.canonicality * 0.3;
-        let score_b = b.bm25_score * 0.7 + b.canonicality * 0.3;
-        score_b
-            .partial_cmp(&score_a)
-            .unwrap_or(std::cmp::Ordering::Equal)
-    });
+    // Sort by combined score with deterministic tie-breaks.
+    all_sections.sort_by(compare_sections_by_relevance);
 
     // Take top N sections
     all_sections.into_iter().take(max_sections).collect()
@@ -5319,6 +5928,7 @@ fn classify_target_doc(path: &str) -> DocType {
 /// Select sections from an ADR doc
 fn select_sections_for_adr(
     doc_path: &str,
+    index: &ForwardIndex,
     entry: &FileEntry,
     max_sections: usize,
 ) -> Vec<SectionMatch> {
@@ -5334,7 +5944,7 @@ fn select_sections_for_adr(
         "summary",
     ];
 
-    if let Ok(content) = fs::read_to_string(doc_path) {
+    if let Ok(content) = read_indexed_doc(index, doc_path, entry) {
         let lines: Vec<&str> = content.lines().collect();
 
         // Try to use section fingerprints
@@ -5390,13 +6000,14 @@ fn select_sections_for_adr(
 /// Select sections from a design/architecture doc
 fn select_sections_for_design(
     doc_path: &str,
+    index: &ForwardIndex,
     entry: &FileEntry,
     anchor: Option<&str>,
     max_sections: usize,
 ) -> Vec<SectionMatch> {
     let mut sections = Vec::new();
 
-    if let Ok(content) = fs::read_to_string(doc_path) {
+    if let Ok(content) = read_indexed_doc(index, doc_path, entry) {
         let lines: Vec<&str> = content.lines().collect();
 
         // If anchor is specified, try to find matching section
@@ -5475,6 +6086,7 @@ fn select_sections_for_design(
 /// Select sections from an ops/runbook doc
 fn select_sections_for_ops(
     doc_path: &str,
+    index: &ForwardIndex,
     entry: &FileEntry,
     max_sections: usize,
 ) -> Vec<SectionMatch> {
@@ -5492,7 +6104,7 @@ fn select_sections_for_ops(
         "restore",
     ];
 
-    if let Ok(content) = fs::read_to_string(doc_path) {
+    if let Ok(content) = read_indexed_doc(index, doc_path, entry) {
         let lines: Vec<&str> = content.lines().collect();
 
         // Prioritize sections with ops keywords
@@ -5550,10 +6162,14 @@ fn select_sections_for_ops(
 }
 
 /// Select sections from an "other" type doc
-fn select_sections_for_other(doc_path: &str, entry: &FileEntry) -> Vec<SectionMatch> {
+fn select_sections_for_other(
+    doc_path: &str,
+    index: &ForwardIndex,
+    entry: &FileEntry,
+) -> Vec<SectionMatch> {
     let mut sections = Vec::new();
 
-    if let Ok(content) = fs::read_to_string(doc_path) {
+    if let Ok(content) = read_indexed_doc(index, doc_path, entry) {
         let lines: Vec<&str> = content.lines().collect();
 
         // Include only the first section (overview)
@@ -5643,14 +6259,24 @@ fn resolve_crossrefs(
 
         // Select sections based on doc type
         let mut doc_sections = match doc_type {
-            DocType::Adr => select_sections_for_adr(&target_path, entry, MAX_SECTIONS_PER_ADR),
+            DocType::Adr => {
+                select_sections_for_adr(&target_path, index, entry, MAX_SECTIONS_PER_ADR)
+            }
             DocType::Design => {
                 // Check if any ref has an anchor
                 let anchor = refs.iter().find_map(|r| r.target_anchor.as_deref());
-                select_sections_for_design(&target_path, entry, anchor, MAX_SECTIONS_PER_DESIGN)
+                select_sections_for_design(
+                    &target_path,
+                    index,
+                    entry,
+                    anchor,
+                    MAX_SECTIONS_PER_DESIGN,
+                )
             }
-            DocType::Ops => select_sections_for_ops(&target_path, entry, MAX_SECTIONS_PER_OPS),
-            DocType::Other => select_sections_for_other(&target_path, entry),
+            DocType::Ops => {
+                select_sections_for_ops(&target_path, index, entry, MAX_SECTIONS_PER_OPS)
+            }
+            DocType::Other => select_sections_for_other(&target_path, index, entry),
         };
 
         // Apply per-doc token budget
@@ -5851,7 +6477,7 @@ fn refine_section(
     section: &SectionMatch,
     query_terms: &[String],
     max_tokens: usize,
-) -> SectionMatch {
+) -> RefinedSection {
     let (heading, body) = extract_heading(&section.content);
 
     // Extract code blocks - preserve them fully
@@ -5879,7 +6505,11 @@ fn refine_section(
     let sentences = split_sentences(&body);
 
     if sentences.is_empty() {
-        return section.clone();
+        return RefinedSection {
+            section: section.clone(),
+            truncated: false,
+            truncation_reasons: Vec::new(),
+        };
     }
 
     // Check if section has cross-references
@@ -5936,24 +6566,21 @@ fn refine_section(
     }
 
     let refined_text = refined_parts.join("\n\n");
+    let (final_text, truncated, truncation_reasons) =
+        truncate_text_to_budget(&refined_text, max_tokens, 0);
 
-    // Trim to token budget if needed
-    let tokens = estimate_tokens(&refined_text);
-    let final_text = if tokens > max_tokens {
-        let char_limit = max_tokens * 4;
-        refined_text[..char_limit.min(refined_text.len())].to_string()
-    } else {
-        refined_text
-    };
-
-    SectionMatch {
-        doc_path: section.doc_path.clone(),
-        heading: section.heading.clone(),
-        line_start: section.line_start,
-        line_end: section.line_end,
-        bm25_score: section.bm25_score,
-        content: final_text,
-        canonicality: section.canonicality,
+    RefinedSection {
+        section: SectionMatch {
+            doc_path: section.doc_path.clone(),
+            heading: section.heading.clone(),
+            line_start: section.line_start,
+            line_end: section.line_end,
+            bm25_score: section.bm25_score,
+            content: final_text,
+            canonicality: section.canonicality,
+        },
+        truncated,
+        truncation_reasons,
     }
 }
 
@@ -5962,7 +6589,7 @@ fn apply_extractive_refiner(
     sections: Vec<SectionMatch>,
     query: &str,
     max_tokens_per_section: usize,
-) -> Vec<SectionMatch> {
+) -> Vec<RefinedSection> {
     let query_terms = parse_query_terms(query, true);
 
     sections
@@ -6007,8 +6634,8 @@ fn resolve_indexed_path(input: &str, index: &ForwardIndex) -> Option<String> {
     }
 
     if Path::new(trimmed).is_absolute() {
-        if let Ok(cwd) = std::env::current_dir() {
-            if let Ok(stripped) = Path::new(trimmed).strip_prefix(&cwd) {
+        if let Some(source_root) = forward_index_source_root(index) {
+            if let Ok(stripped) = Path::new(trimmed).strip_prefix(&source_root) {
                 let stripped_str = stripped.to_string_lossy().to_string();
                 if !stripped_str.is_empty() {
                     candidates.push(stripped_str);
@@ -6081,7 +6708,7 @@ fn collect_sections_for_files(
         let canonicality = score_canonicality(path, entry);
 
         if !entry.section_fingerprints.is_empty() {
-            if let Ok(content) = fs::read_to_string(path) {
+            if let Ok(content) = read_indexed_doc(index, path, entry) {
                 let lines: Vec<&str> = content.lines().collect();
                 for section in &entry.section_fingerprints {
                     let start = section.line_start.saturating_sub(1);
@@ -6100,7 +6727,7 @@ fn collect_sections_for_files(
                     }
                 }
             }
-        } else if let Ok(content) = fs::read_to_string(path) {
+        } else if let Ok(content) = read_indexed_doc(index, path, entry) {
             all_sections.push(SectionMatch {
                 doc_path: path.to_string(),
                 heading: "Full Document".to_string(),
@@ -6113,15 +6740,698 @@ fn collect_sections_for_files(
         }
     }
 
-    all_sections.sort_by(|a, b| {
-        let score_a = a.bm25_score * 0.7 + a.canonicality * 0.3;
-        let score_b = b.bm25_score * 0.7 + b.canonicality * 0.3;
-        score_b
-            .partial_cmp(&score_a)
-            .unwrap_or(std::cmp::Ordering::Equal)
-    });
+    all_sections.sort_by(compare_sections_by_relevance);
 
     all_sections.into_iter().take(max_sections).collect()
+}
+
+fn collect_context_selection(
+    query: &str,
+    from_files: &[String],
+    index: &ForwardIndex,
+    max_sections: usize,
+) -> Result<ContextSelection, ContextSelectionIssue> {
+    let query_label = if query.trim().is_empty() {
+        "selected files".to_string()
+    } else {
+        query.to_string()
+    };
+    let query_for_refiner = if query.trim().is_empty() {
+        String::new()
+    } else {
+        query.to_string()
+    };
+
+    let sections = if !from_files.is_empty() {
+        let expanded = expand_from_files_args(from_files)
+            .map_err(|_| ContextSelectionIssue::NoIndexedFilesMatched)?;
+        let (resolved, missing) = resolve_from_files(&expanded, index);
+
+        if !missing.is_empty() {
+            return Err(ContextSelectionIssue::MissingFiles(missing));
+        }
+
+        if resolved.is_empty() {
+            return Err(ContextSelectionIssue::NoIndexedFilesMatched);
+        }
+
+        collect_sections_for_files(&resolved, index, query, max_sections)
+    } else {
+        let query_terms = parse_query_terms(query, true);
+        if query_terms.is_empty() {
+            return Err(ContextSelectionIssue::NoSearchableTerms);
+        }
+        search_relevant_sections(query, index, max_sections)
+    };
+
+    if sections.is_empty() {
+        return Err(ContextSelectionIssue::NoRelevantSections(query_label));
+    }
+
+    Ok(ContextSelection {
+        query_label,
+        query_for_refiner,
+        sections,
+    })
+}
+
+fn build_mcp_search_response(
+    query: &str,
+    from_files: &[String],
+    index_dir: &Path,
+    options: McpSearchOptions,
+) -> Result<McpSearchResponse, Box<dyn std::error::Error>> {
+    let forward_index = load_forward_index(index_dir)?;
+    let selection_mode = if from_files.is_empty() {
+        "query".to_string()
+    } else {
+        "from_files".to_string()
+    };
+    let requested_query = if query.trim().is_empty() {
+        "selected files".to_string()
+    } else {
+        query.to_string()
+    };
+
+    let selection_limit = options.max_results.max(1).saturating_mul(4).max(8);
+    let selection = match collect_context_selection(
+        query,
+        from_files,
+        &forward_index,
+        selection_limit,
+    ) {
+        Ok(selection) => selection,
+        Err(issue) => {
+            let (error, message, missing_files) = match issue {
+                ContextSelectionIssue::NoSearchableTerms => (
+                    Some("no_query_terms".to_string()),
+                    Some("No searchable terms in query. Try different keywords.".to_string()),
+                    Vec::new(),
+                ),
+                ContextSelectionIssue::MissingFiles(missing) => (
+                    Some("missing_files".to_string()),
+                    Some(
+                        "Some files were not found in the index; search-context requires explicit indexed files."
+                            .to_string(),
+                    ),
+                    missing,
+                ),
+                ContextSelectionIssue::NoIndexedFilesMatched => (
+                    Some("no_indexed_files".to_string()),
+                    Some("No indexed files matched the provided inputs.".to_string()),
+                    Vec::new(),
+                ),
+                ContextSelectionIssue::NoRelevantSections(label) => (
+                    Some("no_relevant_sections".to_string()),
+                    Some(format!("No relevant sections found for query: \"{}\"", label)),
+                    Vec::new(),
+                ),
+            };
+
+            return Ok(McpSearchResponse {
+                schema_version: MCP_SCHEMA_VERSION,
+                tool: "search_context".to_string(),
+                query: requested_query,
+                selection_mode,
+                budget: McpSearchBudget {
+                    max_results: options.max_results,
+                    max_tokens: options.max_tokens,
+                    max_bytes: options.max_bytes,
+                    ..McpSearchBudget::default()
+                },
+                pressure: McpPressure::default(),
+                results: Vec::new(),
+                error,
+                message,
+                missing_files,
+            });
+        }
+    };
+
+    let (unique_sections, deduped_hits) = dedupe_section_matches(selection.sections.clone());
+    let max_results = options.max_results.max(1);
+    let per_result_tokens = (options.max_tokens / max_results).max(40);
+    let per_result_bytes = (options.max_bytes / max_results).max(160);
+    let preview_sections = apply_extractive_refiner(
+        unique_sections.clone(),
+        &selection.query_for_refiner,
+        per_result_tokens,
+    );
+
+    let mut pressure = McpPressure::default();
+    let mut budget = McpSearchBudget {
+        max_results: options.max_results,
+        max_tokens: options.max_tokens,
+        max_bytes: options.max_bytes,
+        candidate_hits: selection.sections.len(),
+        deduped_hits,
+        ..McpSearchBudget::default()
+    };
+    let mut results = Vec::new();
+    let mut used_tokens = 0usize;
+    let mut used_bytes = 0usize;
+
+    for (rank, (raw_section, preview_section)) in unique_sections
+        .iter()
+        .zip(preview_sections.iter())
+        .enumerate()
+    {
+        if results.len() >= max_results {
+            pressure.truncated = true;
+            pressure.reasons.push("result_cap".to_string());
+            break;
+        }
+
+        let (preview, truncated, truncation_reasons) = truncate_text_to_budget(
+            &preview_section.section.content,
+            per_result_tokens,
+            per_result_bytes,
+        );
+        let preview_tokens = estimate_tokens(&preview);
+        let preview_bytes = preview.len();
+        let mut result_truncated = preview_section.truncated || truncated;
+        let mut result_reasons = preview_section.truncation_reasons.clone();
+        result_reasons.extend(truncation_reasons.clone());
+
+        if used_tokens + preview_tokens > options.max_tokens {
+            pressure.truncated = true;
+            pressure.reasons.push("token_cap".to_string());
+            break;
+        }
+        if used_bytes + preview_bytes > options.max_bytes {
+            pressure.truncated = true;
+            pressure.reasons.push("byte_cap".to_string());
+            break;
+        }
+
+        result_reasons.sort();
+        result_reasons.dedup();
+        result_truncated = result_truncated || !result_reasons.is_empty();
+
+        if result_truncated {
+            pressure.truncated = true;
+            pressure.reasons.extend(result_reasons.clone());
+        }
+
+        let handle = build_mcp_handle(&selection.query_label, raw_section);
+        let artifact = McpArtifact {
+            schema_version: MCP_SCHEMA_VERSION,
+            handle: handle.clone(),
+            query: selection.query_label.clone(),
+            source: build_mcp_source_ref(raw_section),
+            scores: McpScoreBreakdown {
+                bm25: raw_section.bm25_score,
+                canonicality: raw_section.canonicality,
+                combined: combined_section_score(raw_section),
+            },
+            preview: preview.clone(),
+            content: raw_section.content.clone(),
+            created_at: chrono_now(),
+        };
+        if let Err(err) = store_mcp_artifact(index_dir, &artifact) {
+            return Ok(McpSearchResponse {
+                schema_version: MCP_SCHEMA_VERSION,
+                tool: "search_context".to_string(),
+                query: selection.query_label.clone(),
+                selection_mode: selection_mode.clone(),
+                budget: McpSearchBudget {
+                    returned_results: results.len(),
+                    estimated_tokens: used_tokens,
+                    bytes: used_bytes,
+                    ..budget
+                },
+                pressure,
+                results,
+                error: Some("artifact_store_unavailable".to_string()),
+                message: Some(format!(
+                    "Unable to persist MCP handles for follow-up fetches: {}",
+                    err
+                )),
+                missing_files: Vec::new(),
+            });
+        }
+
+        results.push(McpSearchResult {
+            handle,
+            rank: rank + 1,
+            source: artifact.source.clone(),
+            scores: artifact.scores.clone(),
+            preview,
+            preview_tokens,
+            preview_bytes,
+            truncated: result_truncated,
+            truncation_reasons: result_reasons,
+        });
+
+        used_tokens += preview_tokens;
+        used_bytes += preview_bytes;
+    }
+
+    budget.returned_results = results.len();
+    budget.omitted_hits = unique_sections.len().saturating_sub(results.len());
+    budget.estimated_tokens = used_tokens;
+    budget.bytes = used_bytes;
+
+    if budget.omitted_hits > 0 && !pressure.reasons.iter().any(|reason| reason == "result_cap") {
+        pressure.truncated = true;
+        pressure.reasons.push("result_cap".to_string());
+    }
+    pressure.reasons.sort();
+    pressure.reasons.dedup();
+
+    Ok(McpSearchResponse {
+        schema_version: MCP_SCHEMA_VERSION,
+        tool: "search_context".to_string(),
+        query: selection.query_label,
+        selection_mode,
+        budget,
+        pressure,
+        results,
+        error: None,
+        message: None,
+        missing_files: Vec::new(),
+    })
+}
+
+fn cmd_mcp_search_context(
+    query: &str,
+    from_files: &[String],
+    index_dir: &Path,
+    options: McpSearchOptions,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let response = build_mcp_search_response(query, from_files, index_dir, options)?;
+    println!("{}", serde_json::to_string_pretty(&response)?);
+    Ok(())
+}
+
+fn build_mcp_fetch_response(
+    handle: &str,
+    index_dir: &Path,
+    options: McpFetchOptions,
+) -> Result<McpFetchResponse, Box<dyn std::error::Error>> {
+    let artifact = match load_mcp_artifact(index_dir, handle) {
+        Ok(artifact) => artifact,
+        Err(_) => {
+            return Ok(McpFetchResponse {
+                schema_version: MCP_SCHEMA_VERSION,
+                tool: "fetch_context".to_string(),
+                handle: handle.to_string(),
+                budget: McpFetchBudget {
+                    max_tokens: options.max_tokens,
+                    max_bytes: options.max_bytes,
+                    ..McpFetchBudget::default()
+                },
+                pressure: McpPressure::default(),
+                query: None,
+                result: None,
+                error: Some("unknown_handle".to_string()),
+                message: Some(format!(
+                    "No stored MCP artifact found for handle '{}'. Run `yore mcp search-context` first.",
+                    handle
+                )),
+            });
+        }
+    };
+
+    let (content, truncated, truncation_reasons) =
+        truncate_text_to_budget(&artifact.content, options.max_tokens, options.max_bytes);
+    let content_tokens = estimate_tokens(&content);
+    let content_bytes = content.len();
+
+    Ok(McpFetchResponse {
+        schema_version: MCP_SCHEMA_VERSION,
+        tool: "fetch_context".to_string(),
+        handle: handle.to_string(),
+        budget: McpFetchBudget {
+            max_tokens: options.max_tokens,
+            max_bytes: options.max_bytes,
+            estimated_tokens: content_tokens,
+            bytes: content_bytes,
+        },
+        pressure: McpPressure {
+            truncated,
+            reasons: truncation_reasons,
+        },
+        query: Some(artifact.query),
+        result: Some(McpFetchResult {
+            source: artifact.source,
+            scores: artifact.scores,
+            preview: artifact.preview,
+            content,
+            content_tokens,
+            content_bytes,
+        }),
+        error: None,
+        message: None,
+    })
+}
+
+fn cmd_mcp_fetch_context(
+    handle: &str,
+    index_dir: &Path,
+    options: McpFetchOptions,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let response = build_mcp_fetch_response(handle, index_dir, options)?;
+    println!("{}", serde_json::to_string_pretty(&response)?);
+    Ok(())
+}
+
+fn read_mcp_stdio_message<R: BufRead>(
+    reader: &mut R,
+) -> Result<Option<serde_json::Value>, io::Error> {
+    let mut content_length: Option<usize> = None;
+    let mut line = String::new();
+
+    loop {
+        line.clear();
+        let bytes_read = reader.read_line(&mut line)?;
+        if bytes_read == 0 {
+            if content_length.is_none() {
+                return Ok(None);
+            }
+            return Err(io::Error::new(
+                io::ErrorKind::UnexpectedEof,
+                "unexpected EOF while reading MCP message headers",
+            ));
+        }
+
+        if line == "\r\n" || line == "\n" {
+            break;
+        }
+
+        let header = line.trim_end_matches(['\r', '\n']);
+        if let Some((name, value)) = header.split_once(':') {
+            if name.eq_ignore_ascii_case("content-length") {
+                content_length = Some(value.trim().parse().map_err(|err| {
+                    io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        format!("invalid Content-Length header: {}", err),
+                    )
+                })?);
+            }
+        }
+    }
+
+    let content_length = content_length.ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            "missing Content-Length header in MCP message",
+        )
+    })?;
+    let mut payload = vec![0; content_length];
+    reader.read_exact(&mut payload)?;
+    serde_json::from_slice(&payload)
+        .map(Some)
+        .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err))
+}
+
+fn write_mcp_stdio_message<W: Write, T: Serialize>(
+    writer: &mut W,
+    payload: &T,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let body = serde_json::to_vec(payload)?;
+    write!(writer, "Content-Length: {}\r\n\r\n", body.len())?;
+    writer.write_all(&body)?;
+    writer.flush()?;
+    Ok(())
+}
+
+fn resolve_mcp_tool_index(default_index: &Path, requested_index: Option<PathBuf>) -> PathBuf {
+    requested_index.unwrap_or_else(|| default_index.to_path_buf())
+}
+
+fn mcp_tool_definitions() -> serde_json::Value {
+    serde_json::json!([
+        {
+            "name": "search_context",
+            "description": "Return bounded previews, source references, pressure metadata, and opaque handles for explicit follow-up fetches.",
+            "inputSchema": {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "Natural language query or question. Optional when from_files is provided."
+                    },
+                    "from_files": {
+                        "type": "array",
+                        "description": "Explicit indexed files to preview instead of a query. Supports @list.txt expansion.",
+                        "items": {
+                            "type": "string"
+                        },
+                        "minItems": 1
+                    },
+                    "max_results": {
+                        "type": "integer",
+                        "description": "Maximum preview results to return.",
+                        "minimum": 1,
+                        "default": 5
+                    },
+                    "max_tokens": {
+                        "type": "integer",
+                        "description": "Approximate maximum total tokens across previews.",
+                        "minimum": 1,
+                        "default": 1200
+                    },
+                    "max_bytes": {
+                        "type": "integer",
+                        "description": "Maximum total bytes across previews.",
+                        "minimum": 1,
+                        "default": 12000
+                    },
+                    "index": {
+                        "type": "string",
+                        "description": "Optional override for the index directory. Defaults to the server's configured index."
+                    }
+                },
+                "oneOf": [
+                    {
+                        "required": ["query"]
+                    },
+                    {
+                        "required": ["from_files"]
+                    }
+                ]
+            }
+        },
+        {
+            "name": "fetch_context",
+            "description": "Expand a previously returned opaque handle with its own token and byte caps.",
+            "inputSchema": {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                    "handle": {
+                        "type": "string",
+                        "description": "Opaque ctx_... handle returned by search_context."
+                    },
+                    "max_tokens": {
+                        "type": "integer",
+                        "description": "Approximate maximum tokens for fetched content.",
+                        "minimum": 1,
+                        "default": 4000
+                    },
+                    "max_bytes": {
+                        "type": "integer",
+                        "description": "Maximum bytes for fetched content.",
+                        "minimum": 1,
+                        "default": 20000
+                    },
+                    "index": {
+                        "type": "string",
+                        "description": "Optional override for the index directory. Defaults to the server's configured index."
+                    }
+                },
+                "required": ["handle"]
+            }
+        }
+    ])
+}
+
+fn build_mcp_tool_result<T: Serialize>(
+    payload: &T,
+    is_error: bool,
+) -> Result<serde_json::Value, Box<dyn std::error::Error>> {
+    Ok(serde_json::json!({
+        "content": [
+            {
+                "type": "text",
+                "text": serde_json::to_string(payload)?,
+            }
+        ],
+        "structuredContent": serde_json::to_value(payload)?,
+        "isError": is_error,
+    }))
+}
+
+fn json_rpc_success(id: serde_json::Value, result: serde_json::Value) -> serde_json::Value {
+    serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": id,
+        "result": result,
+    })
+}
+
+fn json_rpc_error(id: Option<serde_json::Value>, code: i64, message: &str) -> serde_json::Value {
+    serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": id.unwrap_or(serde_json::Value::Null),
+        "error": {
+            "code": code,
+            "message": message,
+        }
+    })
+}
+
+fn cmd_mcp_serve(index_dir: &Path) -> Result<(), Box<dyn std::error::Error>> {
+    let stdin = io::stdin();
+    let stdout = io::stdout();
+    let mut reader = stdin.lock();
+    let mut writer = stdout.lock();
+
+    loop {
+        let Some(message) = read_mcp_stdio_message(&mut reader)? else {
+            break;
+        };
+        let request: JsonRpcRequest = match serde_json::from_value(message) {
+            Ok(request) => request,
+            Err(err) => {
+                let response = json_rpc_error(None, -32600, &format!("Invalid request: {}", err));
+                write_mcp_stdio_message(&mut writer, &response)?;
+                continue;
+            }
+        };
+
+        if request.jsonrpc.as_deref() != Some("2.0") {
+            if let Some(id) = request.id {
+                let response = json_rpc_error(Some(id), -32600, "Only JSON-RPC 2.0 is supported.");
+                write_mcp_stdio_message(&mut writer, &response)?;
+            }
+            continue;
+        }
+
+        let response = match request.method.as_str() {
+            "initialize" => {
+                let params: McpInitializeParams = serde_json::from_value(request.params)
+                    .unwrap_or_else(|_| McpInitializeParams::default());
+                let protocol_version = params
+                    .protocol_version
+                    .unwrap_or_else(|| DEFAULT_MCP_PROTOCOL_VERSION.to_string());
+                request.id.map(|id| {
+                    json_rpc_success(
+                        id,
+                        serde_json::json!({
+                            "protocolVersion": protocol_version,
+                            "capabilities": {
+                                "tools": {
+                                    "listChanged": false
+                                }
+                            },
+                            "serverInfo": {
+                                "name": "yore",
+                                "version": env!("CARGO_PKG_VERSION")
+                            },
+                            "instructions": "Use search_context for bounded previews and fetch_context only for explicit follow-up expansion.",
+                        }),
+                    )
+                })
+            }
+            "notifications/initialized" | "notifications/cancelled" => None,
+            "ping" => request
+                .id
+                .map(|id| json_rpc_success(id, serde_json::json!({}))),
+            "tools/list" => request.id.map(|id| {
+                json_rpc_success(
+                    id,
+                    serde_json::json!({
+                        "tools": mcp_tool_definitions(),
+                    }),
+                )
+            }),
+            "tools/call" => {
+                let id = request.id.clone();
+                match serde_json::from_value::<McpToolCallParams>(request.params) {
+                    Ok(McpToolCallParams { name, arguments }) => match name.as_str() {
+                        "search_context" => {
+                            match serde_json::from_value::<McpSearchToolArgs>(arguments) {
+                                Ok(args) => {
+                                    let tool_index = resolve_mcp_tool_index(index_dir, args.index);
+                                    let response = build_mcp_search_response(
+                                        args.query.trim(),
+                                        &args.from_files,
+                                        &tool_index,
+                                        McpSearchOptions {
+                                            max_results: args.max_results,
+                                            max_tokens: args.max_tokens,
+                                            max_bytes: args.max_bytes,
+                                        },
+                                    )?;
+                                    let result =
+                                        build_mcp_tool_result(&response, response.error.is_some())?;
+                                    id.map(|id| json_rpc_success(id, result))
+                                }
+                                Err(err) => id.map(|id| {
+                                    json_rpc_error(
+                                        Some(id),
+                                        -32602,
+                                        &format!("Invalid search_context arguments: {}", err),
+                                    )
+                                }),
+                            }
+                        }
+                        "fetch_context" => {
+                            match serde_json::from_value::<McpFetchToolArgs>(arguments) {
+                                Ok(args) => {
+                                    let tool_index = resolve_mcp_tool_index(index_dir, args.index);
+                                    let response = build_mcp_fetch_response(
+                                        args.handle.trim(),
+                                        &tool_index,
+                                        McpFetchOptions {
+                                            max_tokens: args.max_tokens,
+                                            max_bytes: args.max_bytes,
+                                        },
+                                    )?;
+                                    let result =
+                                        build_mcp_tool_result(&response, response.error.is_some())?;
+                                    id.map(|id| json_rpc_success(id, result))
+                                }
+                                Err(err) => id.map(|id| {
+                                    json_rpc_error(
+                                        Some(id),
+                                        -32602,
+                                        &format!("Invalid fetch_context arguments: {}", err),
+                                    )
+                                }),
+                            }
+                        }
+                        _ => id.map(|id| {
+                            json_rpc_error(Some(id), -32602, &format!("Unknown tool '{}'.", name))
+                        }),
+                    },
+                    Err(err) => id.map(|id| {
+                        json_rpc_error(
+                            Some(id),
+                            -32602,
+                            &format!("Invalid tools/call params: {}", err),
+                        )
+                    }),
+                }
+            }
+            _ => request.id.map(|id| {
+                json_rpc_error(
+                    Some(id),
+                    -32601,
+                    &format!("Method '{}' is not supported.", request.method),
+                )
+            }),
+        };
+
+        if let Some(response) = response {
+            write_mcp_stdio_message(&mut writer, &response)?;
+        }
+    }
+
+    Ok(())
 }
 
 /// Main assemble command handler
@@ -6136,52 +7446,36 @@ fn cmd_assemble(
     }
 
     let forward_index = load_forward_index(index_dir)?;
-    let query_label = if query.trim().is_empty() {
-        "selected files".to_string()
-    } else {
-        query.to_string()
-    };
-    let query_for_refiner = if query.trim().is_empty() { "" } else { query };
-
-    // Phase 1: Primary section selection
-    let primary_sections = if !from_files.is_empty() {
-        let expanded = expand_from_files_args(from_files)?;
-        let (resolved, missing) = resolve_from_files(&expanded, &forward_index);
-
-        if !missing.is_empty() {
-            eprintln!(
-                "{}",
-                "Some files were not found in the index (they may be missing or excluded):"
-                    .yellow()
-            );
-            for path in missing {
-                eprintln!("  - {}", path);
+    let selection =
+        match collect_context_selection(query, from_files, &forward_index, options.max_sections) {
+            Ok(selection) => selection,
+            Err(ContextSelectionIssue::NoSearchableTerms) => {
+                println!("# No searchable terms in query. Try different keywords.");
+                return Ok(());
             }
-            return Ok(());
-        }
-
-        if resolved.is_empty() {
-            println!("# No indexed files matched the provided inputs.");
-            return Ok(());
-        }
-
-        collect_sections_for_files(&resolved, &forward_index, query, options.max_sections)
-    } else {
-        let query_terms = parse_query_terms(query, true);
-        if query_terms.is_empty() {
-            println!("# No searchable terms in query. Try different keywords.");
-            return Ok(());
-        }
-        search_relevant_sections(query, &forward_index, options.max_sections)
-    };
-
-    if primary_sections.is_empty() {
-        println!(
-            "# No relevant sections found for query: \"{}\"",
-            query_label
-        );
-        return Ok(());
-    }
+            Err(ContextSelectionIssue::MissingFiles(missing)) => {
+                eprintln!(
+                    "{}",
+                    "Some files were not found in the index (they may be missing or excluded):"
+                        .yellow()
+                );
+                for path in missing {
+                    eprintln!("  - {}", path);
+                }
+                return Ok(());
+            }
+            Err(ContextSelectionIssue::NoIndexedFilesMatched) => {
+                println!("# No indexed files matched the provided inputs.");
+                return Ok(());
+            }
+            Err(ContextSelectionIssue::NoRelevantSections(label)) => {
+                println!("# No relevant sections found for query: \"{}\"", label);
+                return Ok(());
+            }
+        };
+    let query_label = selection.query_label;
+    let query_for_refiner = selection.query_for_refiner;
+    let primary_sections = selection.sections;
 
     let primary_tokens: usize = primary_sections
         .iter()
@@ -6222,11 +7516,12 @@ fn cmd_assemble(
             all_sections.extend(xref_sections);
         }
     }
+    let (all_sections, _) = dedupe_section_matches(all_sections);
 
     // Phase 3: Extractive refinement (increase signal density)
     let max_tokens_per_section = options.max_tokens / all_sections.len().max(1);
     let refined_sections =
-        apply_extractive_refiner(all_sections, query_for_refiner, max_tokens_per_section);
+        apply_extractive_refiner(all_sections, &query_for_refiner, max_tokens_per_section);
 
     // If doc_terms requested, prepend a source summary
     if options.doc_terms > 0 {
@@ -6234,17 +7529,17 @@ fn cmd_assemble(
         let query_terms = if query_for_refiner.is_empty() {
             Vec::new()
         } else {
-            parse_query_terms(query_for_refiner, true)
+            parse_query_terms(&query_for_refiner, true)
         };
         let mut seen_docs: HashSet<String> = HashSet::new();
 
         for section in &refined_sections {
-            if seen_docs.contains(&section.doc_path) {
+            if seen_docs.contains(&section.section.doc_path) {
                 continue;
             }
-            seen_docs.insert(section.doc_path.clone());
+            seen_docs.insert(section.section.doc_path.clone());
 
-            if let Some(entry) = forward_index.files.get(&section.doc_path) {
+            if let Some(entry) = forward_index.files.get(&section.section.doc_path) {
                 let top_terms = get_top_doc_terms(
                     entry,
                     &forward_index.idf_map,
@@ -6252,7 +7547,11 @@ fn cmd_assemble(
                     options.doc_terms,
                 );
                 if !top_terms.is_empty() {
-                    println!("<!-- {} : {} -->", section.doc_path, top_terms.join(", "));
+                    println!(
+                        "<!-- {} : {} -->",
+                        section.section.doc_path,
+                        top_terms.join(", ")
+                    );
                 }
             }
         }
@@ -6260,7 +7559,11 @@ fn cmd_assemble(
     }
 
     // Phase 4: Distill to markdown
-    let digest = distill_to_markdown(&refined_sections, &query_label, options.max_tokens);
+    let digest_sections: Vec<SectionMatch> = refined_sections
+        .iter()
+        .map(|section| section.section.clone())
+        .collect();
+    let digest = distill_to_markdown(&digest_sections, &query_label, options.max_tokens);
 
     println!("{}", digest);
 
@@ -6351,7 +7654,11 @@ fn cmd_eval(
             apply_extractive_refiner(all_sections, &question.q, max_tokens_per_section);
 
         // Distill to markdown
-        let digest = distill_to_markdown(&refined_sections, &question.q, max_tokens);
+        let digest_sections: Vec<SectionMatch> = refined_sections
+            .iter()
+            .map(|section| section.section.clone())
+            .collect();
+        let digest = distill_to_markdown(&digest_sections, &question.q, max_tokens);
 
         // Check coverage of expected substrings
         let digest_lower = digest.to_lowercase();
@@ -6480,6 +7787,8 @@ fn run_link_check(
     // Determine root directory for resolving relative paths
     let root_dir = if let Some(r) = root {
         r.to_path_buf()
+    } else if let Some(source_root) = forward_index_source_root(&forward_index) {
+        source_root
     } else {
         // Extract root from index by finding common prefix of all paths
         if let Some((first_path, _)) = forward_index.files.iter().next() {
@@ -9379,6 +10688,7 @@ See [summary](ASYNC_MIGRATION_COMPLETE_SUMMARY.md).
             files,
             indexed_at: chrono_now(),
             version: 3,
+            source_root: String::new(),
             avg_doc_length: 0.0,
             idf_map: HashMap::new(),
         };
@@ -9439,6 +10749,7 @@ See [summary](ASYNC_MIGRATION_COMPLETE_SUMMARY.md).
             files,
             indexed_at: "0".to_string(),
             version: 3,
+            source_root: String::new(),
             avg_doc_length: 0.0,
             idf_map: HashMap::new(),
         };
@@ -10237,6 +11548,7 @@ path = "../api-docs"
             files: map,
             indexed_at: "now".to_string(),
             version: 1,
+            source_root: String::new(),
             avg_doc_length: 0.0,
             idf_map: HashMap::new(),
         }
@@ -10620,5 +11932,24 @@ path = "../api-docs"
         let index = make_forward_index(vec![entry]);
         let sections = collect_sections_for_files(&[file_path_str], &index, "", 1);
         assert_eq!(sections.len(), 1);
+    }
+
+    #[test]
+    fn test_build_mcp_handle_is_stable() {
+        let section = SectionMatch {
+            doc_path: "docs/aa-auth.md".to_string(),
+            heading: "Authentication Overview".to_string(),
+            line_start: 1,
+            line_end: 11,
+            bm25_score: 0.25,
+            content: "# Authentication Overview\n\nAuthentication flow".to_string(),
+            canonicality: 0.5,
+        };
+
+        let left = build_mcp_handle("authentication", &section);
+        let right = build_mcp_handle("authentication", &section);
+
+        assert_eq!(left, right);
+        assert!(left.starts_with("ctx_"));
     }
 }
