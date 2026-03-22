@@ -7,12 +7,27 @@ if [ -z "$repo_root" ]; then
   exit 1
 fi
 
-if [ "${YORE_SKIP_HOOK_PATH_CHECK:-0}" != "1" ]; then
+COMMITHOOKS_DIR="$(git rev-parse --git-dir)"
+source "$COMMITHOOKS_DIR/lib/common.sh"
+source "$COMMITHOOKS_DIR/lib/lint-rust.sh"
+source "$COMMITHOOKS_DIR/lib/secrets.sh"
+
+yore_validate_supported_hook_path() {
+  if [ "${YORE_SKIP_HOOK_PATH_CHECK:-0}" = "1" ]; then
+    return 0
+  fi
+
+  local configured_path
+  local expected_path_one
+  local expected_path_two
+  local expected_path_three
+  local configured_absolute=""
+
   configured_path="$(git config --get core.hooksPath || echo "")"
   expected_path_one="$repo_root/.githooks"
   expected_path_two="$repo_root/scripts/git-hooks"
-  expected_path_three="${COMMITHOOKS_DIR:-${HOME:-/home/$USER}/Documents/commithooks}"
-  configured_absolute=""
+  expected_path_three="${COMMITHOOKS_SOURCE_DIR:-${HOME:-/home/$USER}/Documents/commithooks}"
+
   if [ -n "$configured_path" ]; then
     if printf '%s\n' "$configured_path" | grep -qE '^/'; then
       configured_absolute="$configured_path"
@@ -29,87 +44,25 @@ if [ "${YORE_SKIP_HOOK_PATH_CHECK:-0}" != "1" ]; then
       echo "            Configure with: git config core.hooksPath .githooks" >&2
       echo "            Or use shared hooks at: $expected_path_three" >&2
       echo "            Or run this commit once with ALLOW_HOOKS_PATH_MISMATCH=1" >&2
-      exit 1
-    fi
-  fi
-fi
-
-staged_files="$(git diff --cached --name-only --diff-filter=ACMR || true)"
-if [ -z "$staged_files" ]; then
-  echo "No staged files found. Running squash-scope check only."
-  if [ "${YORE_SKIP_SQUASH_SCOPE_CHECK:-0}" != "1" ]; then
-    "$repo_root/scripts/squash-scope-review.sh"
-  fi
-  exit 0
-fi
-
-run_rust_checks() {
-  if ! command -v cargo >/dev/null 2>&1; then
-    return 0
-  fi
-
-  if printf '%s' "$staged_files" | grep -qE '\.rs$'; then
-    (cd "$repo_root" && cargo fmt --all -- --check)
-    if [ "${YORE_SKIP_CARGO_CHECK:-0}" != "1" ]; then
-      (cd "$repo_root" && cargo check --locked --workspace --all-targets)
+      return 1
     fi
   fi
 }
 
-scan_for_sensitive_content() {
-  if [ "${YORE_SKIP_SENSITIVE_CHECK:-0}" = "1" ]; then
+yore_run_rust_checks() {
+  if ! printf '%s' "$staged_files" | grep -qE '\.rs$'; then
     return 0
   fi
 
-  local patch_file
-  patch_file="$(mktemp)"
-  git diff --cached --no-color > "$patch_file"
-
-  local patterns=(
-    "AKIA[0-9A-Z]{16}"
-    "ASIA[0-9A-Z]{16}"
-    "A3T[0-9A-Z]{16}"
-    "ghp_[A-Za-z0-9_]{20,}"
-    "gho_[A-Za-z0-9_]{20,}"
-    "ghu_[A-Za-z0-9_]{20,}"
-    "ghs_[A-Za-z0-9_]{20,}"
-    "github_pat_[A-Za-z0-9_]{20,}"
-    "ghr_[A-Za-z0-9_]{20,}"
-    "xox[baprs]-[0-9]{10,}-[A-Za-z0-9-]+"
-    "xoxa-[0-9]+-[A-Za-z0-9-]+"
-    "xoxo-[0-9]+-[A-Za-z0-9-]+"
-    "AIza[0-9A-Za-z-_]{35}"
-    "sk-proj-[A-Za-z0-9]{20,}"
-    "sk-[A-Za-z0-9]{20,}"
-    "hf_[A-Za-z0-9]{34}"
-    "sk_live_[0-9a-zA-Z]{24}"
-    "pk_live_[0-9a-zA-Z]{24}"
-    "sk_test_[0-9a-zA-Z]{24}"
-    "pk_test_[0-9a-zA-Z]{24}"
-    "BEGIN (RSA|EC|OPENSSH|DSA) PRIVATE KEY"
-    "BEGIN PRIVATE KEY"
-    "BEGIN PGP PRIVATE KEY BLOCK"
-    "BEGIN ENCRYPTED PRIVATE KEY"
-  )
-
-  local matched=0
-  for pattern in "${patterns[@]}"; do
-    if grep -E -n "$pattern" "$patch_file" >/dev/null; then
-      echo "Potential sensitive content pattern match: $pattern" >&2
-      grep -E -n "$pattern" "$patch_file" >&2
-      matched=1
-    fi
-  done
-
-  rm -f "$patch_file"
-
-  if [ "$matched" -eq 1 ]; then
-    echo "Sensitive-content scan failed. Review staged changes or set YORE_SKIP_SENSITIVE_CHECK=1." >&2
-    return 1
+  commithooks_require_cmd "cargo" || return 0
+  (cd "$repo_root" && commithooks_rust_fmt)
+  if [ "${YORE_SKIP_CARGO_CHECK:-0}" != "1" ]; then
+    commithooks_green "[rust] Running cargo check..."
+    (cd "$repo_root" && cargo check --locked --workspace --all-targets)
   fi
 }
 
-scan_for_absolute_paths() {
+yore_scan_for_absolute_paths() {
   local checker="$repo_root/scripts/abs-path-leak-scan.sh"
   if [ -x "$checker" ]; then
     "$checker"
@@ -118,12 +71,26 @@ scan_for_absolute_paths() {
   fi
 }
 
-run_rust_checks
-scan_for_sensitive_content
-scan_for_absolute_paths
+yore_run_squash_scope_review() {
+  if [ "${YORE_SKIP_SQUASH_SCOPE_CHECK:-0}" = "0" ]; then
+    "$repo_root/scripts/squash-scope-review.sh"
+  else
+    echo "Skipping squash-scope review by request."
+  fi
+}
 
-if [ "${YORE_SKIP_SQUASH_SCOPE_CHECK:-0}" = "0" ]; then
-  "$repo_root/scripts/squash-scope-review.sh"
-else
-  echo "Skipping squash-scope review by request."
+yore_validate_supported_hook_path
+commithooks_skip_during_rebase && exit 0
+
+staged_files="$(git diff --cached --name-only --diff-filter=ACMR || true)"
+if [ -z "$staged_files" ]; then
+  echo "No staged files found. Running squash-scope check only."
+  yore_run_squash_scope_review
+  exit 0
 fi
+
+yore_run_rust_checks
+commithooks_block_sensitive_files
+commithooks_scan_secrets_in_diff
+yore_scan_for_absolute_paths
+yore_run_squash_scope_review

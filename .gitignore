@@ -11,6 +11,10 @@ Cargo.lock
 .yarl/
 .yarl/workspaces/
 
+# Local planning artifacts
+IMPLEMENTATION_PLAN.md
+PROMPT.md
+
 # Editor files
 *.swp
 *.swo
