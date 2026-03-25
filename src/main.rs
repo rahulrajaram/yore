@@ -204,7 +204,7 @@ enum Commands {
         #[arg(short, long)]
         exclude: Vec<String>,
 
-        /// Output as JSON
+        /// Output as JSON (query results include the original query text)
         #[arg(long)]
         json: bool,
 
@@ -255,7 +255,7 @@ enum Commands {
         #[arg(long, default_value = "0")]
         doc_terms: usize,
 
-        /// Show query diagnostics and scoring details (JSON output wraps results + diagnostics)
+        /// Show query diagnostics and scoring details (JSON output wraps query + results + diagnostics)
         #[arg(long)]
         explain: bool,
 
@@ -3265,7 +3265,8 @@ fn cmd_query(
             .map(|(path, score)| {
                 let mut obj = serde_json::json!({
                     "path": path,
-                    "score": score
+                    "score": score,
+                    "query": query
                 });
                 if options.doc_terms > 0 {
                     if let Some(entry) = forward_index.files.get(path) {
@@ -3314,6 +3315,7 @@ fn cmd_query(
                 }
             });
             let wrapped = serde_json::json!({
+                "query": query,
                 "results": output,
                 "diagnostics": diag_json
             });

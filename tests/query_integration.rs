@@ -55,6 +55,7 @@ fn test_query_multi_term_returns_results() {
     assert!(ok_single, "single-term query failed");
     let single_json: Value = serde_json::from_str(&stdout_single).unwrap();
     assert!(!single_json.as_array().unwrap().is_empty());
+    assert_eq!(single_json[0]["query"], "kubernetes");
 
     let mut multi = Command::new(env!("CARGO_BIN_EXE_yore"));
     multi
@@ -65,6 +66,7 @@ fn test_query_multi_term_returns_results() {
     assert!(ok_multi, "multi-term query failed");
     let multi_json: Value = serde_json::from_str(&stdout_multi).unwrap();
     assert!(!multi_json.as_array().unwrap().is_empty());
+    assert_eq!(multi_json[0]["query"], "kubernetes deployment");
 }
 
 #[test]
@@ -106,6 +108,7 @@ fn test_query_empty_results_json_explain() {
     let (ok, stdout) = run_cmd(cmd);
     assert!(ok, "query failed");
     let value: Value = serde_json::from_str(&stdout).unwrap();
+    assert_eq!(value["query"], "nonesuchterm");
     let results = value.get("results").and_then(|v| v.as_array()).unwrap();
     assert!(results.is_empty());
     let diagnostics = value

@@ -299,12 +299,12 @@ yore query <terms...> --index <index-dir>
 
 * `--limit, -n` – Maximum number of results (default: 10)
 * `--files-only, -l` – Only show file paths
-* `--json` – Emit machine‑readable JSON
+* `--json` – Emit machine‑readable JSON; query results include the original query text
 * `--query` – Raw query string that overrides positional terms (avoids shell quoting)
 * `--phrase` – Require adjacency for quoted segments in the query (quotes must be part of the query string)
 * `--no-stopwords` – Keep stopwords in query matching
 * `--doc-terms` – Show top N distinctive terms per result (0 disables)
-* `--explain` – Emit diagnostics; with `--json`, output becomes `{ results, diagnostics }`
+* `--explain` – Emit diagnostics; with `--json`, output becomes `{ query, results, diagnostics }`
   * Diagnostics fields: `tokens`, `stems`, `missing_terms`, `idf`, `bm25`, `index_path`, `doc_count`
 
 **Query syntax**
@@ -315,6 +315,7 @@ Queries are tokenized the same way as indexing (letters and numbers plus `_` and
 
 ```json
 {
+  "query": "async migration plan",
   "results": [...],
   "diagnostics": {
     "tokens": ["async", "migration", "plan"],
