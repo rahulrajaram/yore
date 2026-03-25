@@ -7,7 +7,7 @@ if [ -z "$repo_root" ]; then
   exit 1
 fi
 
-COMMITHOOKS_DIR="$(git rev-parse --git-dir)"
+COMMITHOOKS_DIR="$(cd "$(git rev-parse --git-common-dir)" && pwd)"
 source "$COMMITHOOKS_DIR/lib/common.sh"
 source "$COMMITHOOKS_DIR/lib/lint-rust.sh"
 source "$COMMITHOOKS_DIR/lib/secrets.sh"

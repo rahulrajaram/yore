@@ -28,7 +28,7 @@ safe_mode = "execute"
 backend = "custom"
 prompt_mode = "arg"
 command = "codex"
-args = ["--dangerously-bypass-approvals-and-sandbox", "exec", "--json", "--model", "gpt-5.3-codex-spark", "--config", "model_reasoning_effort=medium"]
+args = ["--dangerously-bypass-approvals-and-sandbox", "exec", "--json", "--model", "gpt-5.4", "--config", "model_reasoning_effort=high"]
 
 [event_loop]
 max_iterations = 5

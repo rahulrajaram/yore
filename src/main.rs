@@ -167,6 +167,47 @@ enum Commands {
         #[arg(long, default_value = "30")]
         stale_days: u64,
     },
+    /// Detect structural document-health issues from build-time metrics.
+    ///
+    /// Uses persisted document and section metrics emitted by `yore build`
+    /// to flag oversized docs, accumulator-style section growth, stale
+    /// completed sections, and changelog sprawl.
+    ///
+    /// Examples:
+    ///   yore health docs/plan.md --index .yore
+    ///   yore health --all --index .yore --json
+    Health {
+        /// Specific file to inspect
+        file: Option<PathBuf>,
+
+        /// Evaluate every indexed document with persisted metrics
+        #[arg(long)]
+        all: bool,
+
+        /// Index directory
+        #[arg(short, long, default_value = ".yore")]
+        index: PathBuf,
+
+        /// Maximum lines before a file is flagged as bloated
+        #[arg(long, default_value = "500")]
+        max_lines: usize,
+
+        /// Maximum count of "Part N" headings before accumulator risk is flagged
+        #[arg(long, default_value = "8")]
+        max_part_sections: usize,
+
+        /// Maximum retained lines across completion-marked sections
+        #[arg(long, default_value = "50")]
+        max_completed_lines: usize,
+
+        /// Maximum changelog list items before changelog bloat is flagged
+        #[arg(long, default_value = "15")]
+        max_changelog_entries: usize,
+
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+    },
     /// Build forward and reverse indexes over documentation.
     ///
     /// Walks a directory tree, indexes Markdown/text files, and writes
@@ -1592,6 +1633,30 @@ struct StaleResult {
     files: Vec<StaleFile>,
 }
 
+#[derive(Serialize, Debug, Clone)]
+struct HealthIssue {
+    kind: String,
+    severity: String,
+    message: String,
+    value: usize,
+    threshold: usize,
+}
+
+#[derive(Serialize, Debug, Clone)]
+struct HealthFileResult {
+    file: String,
+    status: String,
+    issues: Vec<HealthIssue>,
+}
+
+#[derive(Serialize, Debug)]
+struct HealthResult {
+    total_files: usize,
+    unhealthy_files: usize,
+    warning_files: usize,
+    files: Vec<HealthFileResult>,
+}
+
 #[derive(Serialize, Debug)]
 struct GraphNode {
     id: String,
@@ -1790,6 +1855,54 @@ struct ForwardIndex {
 #[derive(Serialize, Deserialize, Debug)]
 struct ReverseIndex {
     keywords: HashMap<String, Vec<ReverseEntry>>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, Default, PartialEq)]
+struct SectionMetrics {
+    heading: String,
+    level: usize,
+    line_start: usize,
+    line_end: usize,
+    line_count: usize,
+    word_count: usize,
+    link_count: usize,
+    list_item_count: usize,
+    code_block_count: usize,
+    has_completion_marker: bool,
+    looks_like_part: bool,
+    looks_like_changelog: bool,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, Default, PartialEq)]
+struct DocumentMetrics {
+    path: String,
+    line_count: usize,
+    word_count: usize,
+    heading_count: usize,
+    section_count: usize,
+    link_count: usize,
+    h1_count: usize,
+    h2_count: usize,
+    h3_count: usize,
+    h4_plus_count: usize,
+    code_block_count: usize,
+    list_item_count: usize,
+    table_row_count: usize,
+    frontmatter_key_count: usize,
+    metadata_line_count: usize,
+    part_heading_count: usize,
+    completion_heading_count: usize,
+    changelog_heading_count: usize,
+    changelog_entry_count: usize,
+    longest_section_lines: usize,
+    sections: Vec<SectionMetrics>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, Default)]
+struct DocumentMetricsIndex {
+    indexed_at: String,
+    version: u32,
+    files: HashMap<String, DocumentMetrics>,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -2112,6 +2225,27 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
 
             Ok(())
         }
+        Commands::Health {
+            file,
+            all,
+            index,
+            max_lines,
+            max_part_sections,
+            max_completed_lines,
+            max_changelog_entries,
+            json,
+        } => cmd_health(
+            file.as_deref(),
+            all,
+            &index,
+            &HealthOptions {
+                max_lines,
+                max_part_sections,
+                max_completed_lines,
+                max_changelog_entries,
+            },
+            json,
+        ),
         Commands::Build {
             path,
             output,
@@ -2403,6 +2537,11 @@ fn cmd_build(
     let mut reverse_index = ReverseIndex {
         keywords: HashMap::new(),
     };
+    let mut document_metrics_index = DocumentMetricsIndex {
+        indexed_at: chrono_now(),
+        version: 1,
+        files: HashMap::new(),
+    };
 
     let mut file_count = 0;
     let mut total_headings = 0;
@@ -2454,10 +2593,11 @@ fn cmd_build(
         }
 
         // Index the file
-        if let Ok(mut entry) = index_file(path) {
+        if let Ok((mut entry, mut metrics)) = index_file(path) {
             let physical_path = canonicalize_existing_path(path);
             let rel_path = build_indexed_doc_key(&physical_path, &source_root);
             entry.path = physical_path.to_string_lossy().to_string();
+            metrics.path = rel_path.clone();
 
             // Update reverse index with heading keywords
             for keyword in &entry.keywords {
@@ -2510,6 +2650,9 @@ fn cmd_build(
             total_links += entry.links.len();
             file_count += 1;
 
+            document_metrics_index
+                .files
+                .insert(rel_path.clone(), metrics);
             forward_index.files.insert(rel_path, entry);
         }
     }
@@ -2552,9 +2695,14 @@ fn cmd_build(
     let forward_path = output.join("forward_index.json");
     let reverse_path = output.join("reverse_index.json");
     let stats_path = output.join("stats.json");
+    let metrics_path = output.join("document_metrics.json");
 
     fs::write(&forward_path, serde_json::to_string_pretty(&forward_index)?)?;
     fs::write(&reverse_path, serde_json::to_string_pretty(&reverse_index)?)?;
+    fs::write(
+        &metrics_path,
+        serde_json::to_string_pretty(&document_metrics_index)?,
+    )?;
 
     let stats = IndexStats {
         total_files: file_count,
@@ -2617,7 +2765,7 @@ fn cmd_build(
     Ok(())
 }
 
-fn index_file(path: &Path) -> Result<FileEntry, Box<dyn std::error::Error>> {
+fn index_file(path: &Path) -> Result<(FileEntry, DocumentMetrics), Box<dyn std::error::Error>> {
     let content = fs::read_to_string(path)?;
     let metadata = fs::metadata(path)?;
 
@@ -2712,24 +2860,245 @@ fn index_file(path: &Path) -> Result<FileEntry, Box<dyn std::error::Error>> {
 
     // NEW: Compute section-level SimHash fingerprints
     let section_fingerprints = index_sections(&content, &headings);
+    let metrics =
+        compute_document_metrics(&path.to_string_lossy(), &content, &lines, &headings, &links);
 
     // Compute simhash fingerprint
     let simhash = compute_simhash(&content);
 
-    Ok(FileEntry {
-        path: path.to_string_lossy().to_string(),
-        size_bytes: metadata.len(),
-        line_count,
-        headings,
-        keywords: keywords.into_iter().collect(),
-        body_keywords: body_keywords.into_iter().collect(),
-        links,
-        simhash,
-        term_frequencies,
-        doc_length: total_terms,
-        minhash,
-        section_fingerprints,
-    })
+    Ok((
+        FileEntry {
+            path: path.to_string_lossy().to_string(),
+            size_bytes: metadata.len(),
+            line_count,
+            headings,
+            keywords: keywords.into_iter().collect(),
+            body_keywords: body_keywords.into_iter().collect(),
+            links,
+            simhash,
+            term_frequencies,
+            doc_length: total_terms,
+            minhash,
+            section_fingerprints,
+        },
+        metrics,
+    ))
+}
+
+fn compute_document_metrics(
+    path: &str,
+    content: &str,
+    lines: &[&str],
+    headings: &[Heading],
+    links: &[Link],
+) -> DocumentMetrics {
+    let word_re = Regex::new(r"[A-Za-z0-9_][A-Za-z0-9_-]*").unwrap();
+    let list_re = Regex::new(r"^(\s*[-+*]\s+|\s*\d+\.\s+)").unwrap();
+    let metadata_re =
+        Regex::new(r"^(?:\*\*[^*]+\*\*|[A-Za-z][A-Za-z0-9 _/\-]{1,40}):\s+\S").unwrap();
+
+    let mut h1_count = 0;
+    let mut h2_count = 0;
+    let mut h3_count = 0;
+    let mut h4_plus_count = 0;
+    let mut part_heading_count = 0;
+    let mut completion_heading_count = 0;
+    let mut changelog_heading_count = 0;
+
+    for heading in headings {
+        match heading.level {
+            1 => h1_count += 1,
+            2 => h2_count += 1,
+            3 => h3_count += 1,
+            _ => h4_plus_count += 1,
+        }
+        if heading_looks_like_part(&heading.text) {
+            part_heading_count += 1;
+        }
+        if heading_has_completion_marker(&heading.text) {
+            completion_heading_count += 1;
+        }
+        if heading_looks_like_changelog(&heading.text) {
+            changelog_heading_count += 1;
+        }
+    }
+
+    let code_block_count = count_code_blocks(lines);
+    let list_item_count = lines
+        .iter()
+        .filter(|line| list_re.is_match(line.trim_end()))
+        .count();
+    let table_row_count = lines
+        .iter()
+        .filter(|line| {
+            let trimmed = line.trim();
+            trimmed.matches('|').count() >= 2
+        })
+        .count();
+    let word_count = word_re.find_iter(content).count();
+    let (frontmatter_key_count, metadata_scan_start) = extract_frontmatter_key_count(lines);
+    let metadata_line_count = lines
+        .iter()
+        .enumerate()
+        .skip(metadata_scan_start)
+        .take_while(|(_, line)| {
+            let trimmed = line.trim();
+            !trimmed.is_empty() && !trimmed.starts_with('#')
+        })
+        .filter(|(_, line)| metadata_re.is_match(line.trim()))
+        .count();
+
+    let sections = compute_section_metrics(lines, headings, links);
+    let longest_section_lines = sections
+        .iter()
+        .map(|section| section.line_count)
+        .max()
+        .unwrap_or(0);
+    let changelog_entry_count = sections
+        .iter()
+        .filter(|section| section.looks_like_changelog)
+        .map(|section| section.list_item_count)
+        .sum();
+
+    DocumentMetrics {
+        path: path.to_string(),
+        line_count: lines.len(),
+        word_count,
+        heading_count: headings.len(),
+        section_count: sections.len(),
+        link_count: links.len(),
+        h1_count,
+        h2_count,
+        h3_count,
+        h4_plus_count,
+        code_block_count,
+        list_item_count,
+        table_row_count,
+        frontmatter_key_count,
+        metadata_line_count,
+        part_heading_count,
+        completion_heading_count,
+        changelog_heading_count,
+        changelog_entry_count,
+        longest_section_lines,
+        sections,
+    }
+}
+
+fn extract_frontmatter_key_count(lines: &[&str]) -> (usize, usize) {
+    if lines.first().map(|line| line.trim()) != Some("---") {
+        return (0, 0);
+    }
+
+    let mut key_count = 0;
+    for (idx, line) in lines.iter().enumerate().skip(1) {
+        let trimmed = line.trim();
+        if trimmed == "---" {
+            return (key_count, idx + 1);
+        }
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            continue;
+        }
+        if trimmed.contains(':') {
+            key_count += 1;
+        }
+    }
+
+    (0, 0)
+}
+
+fn heading_looks_like_part(text: &str) -> bool {
+    let trimmed = text.trim().to_ascii_lowercase();
+    trimmed.starts_with("part ")
+        && trimmed
+            .split_whitespace()
+            .nth(1)
+            .map(|token| {
+                token
+                    .chars()
+                    .next()
+                    .map(|ch| ch.is_ascii_digit())
+                    .unwrap_or(false)
+            })
+            .unwrap_or(false)
+}
+
+fn heading_has_completion_marker(text: &str) -> bool {
+    let lowered = text.to_ascii_lowercase();
+    lowered.contains("done")
+        || lowered.contains("complete")
+        || lowered.contains("completed")
+        || lowered.contains("resolved")
+}
+
+fn heading_looks_like_changelog(text: &str) -> bool {
+    let lowered = text.to_ascii_lowercase();
+    lowered.contains("changelog")
+        || lowered.contains("release notes")
+        || lowered == "changes"
+        || lowered.ends_with(" changes")
+        || lowered.ends_with(" history")
+}
+
+fn count_code_blocks(lines: &[&str]) -> usize {
+    let mut count = 0;
+    let mut in_block = false;
+
+    for line in lines {
+        if line.trim_start().starts_with("```") {
+            if !in_block {
+                count += 1;
+            }
+            in_block = !in_block;
+        }
+    }
+
+    count
+}
+
+fn compute_section_metrics(
+    lines: &[&str],
+    headings: &[Heading],
+    links: &[Link],
+) -> Vec<SectionMetrics> {
+    let word_re = Regex::new(r"[A-Za-z0-9_][A-Za-z0-9_-]*").unwrap();
+    let list_re = Regex::new(r"^(\s*[-+*]\s+|\s*\d+\.\s+)").unwrap();
+    let mut sections = Vec::new();
+
+    for idx in 0..headings.len() {
+        let start = headings[idx].line.saturating_sub(1);
+        let end = headings
+            .get(idx + 1)
+            .map(|heading| heading.line.saturating_sub(1))
+            .unwrap_or(lines.len());
+        let section_lines = &lines[start..end];
+        let section_text = section_lines.join("\n");
+        let line_start = start + 1;
+        let line_end = end;
+
+        sections.push(SectionMetrics {
+            heading: headings[idx].text.clone(),
+            level: headings[idx].level,
+            line_start,
+            line_end,
+            line_count: end.saturating_sub(start),
+            word_count: word_re.find_iter(&section_text).count(),
+            link_count: links
+                .iter()
+                .filter(|link| link.line >= line_start && link.line <= line_end)
+                .count(),
+            list_item_count: section_lines
+                .iter()
+                .filter(|line| list_re.is_match(line.trim_end()))
+                .count(),
+            code_block_count: count_code_blocks(section_lines),
+            has_completion_marker: heading_has_completion_marker(&headings[idx].text),
+            looks_like_part: heading_looks_like_part(&headings[idx].text),
+            looks_like_changelog: heading_looks_like_changelog(&headings[idx].text),
+        });
+    }
+
+    sections
 }
 
 fn extract_keywords(text: &str) -> Vec<String> {
@@ -3176,6 +3545,13 @@ struct AssembleOptions {
     depth: usize,
     format: String,
     doc_terms: usize,
+}
+
+struct HealthOptions {
+    max_lines: usize,
+    max_part_sections: usize,
+    max_completed_lines: usize,
+    max_changelog_entries: usize,
 }
 
 fn cmd_query(
@@ -4775,6 +5151,16 @@ fn load_forward_index(index_dir: &Path) -> Result<ForwardIndex, Box<dyn std::err
     let path = index_dir.join("forward_index.json");
     let content =
         fs::read_to_string(&path).map_err(|_| "Index not found. Run 'yore build' first.")?;
+    Ok(serde_json::from_str(&content)?)
+}
+
+fn load_document_metrics(
+    index_dir: &Path,
+) -> Result<DocumentMetricsIndex, Box<dyn std::error::Error>> {
+    let path = index_dir.join("document_metrics.json");
+    let content = fs::read_to_string(&path).map_err(|_| {
+        "Health metrics not found. Re-run 'yore build' to persist document metrics."
+    })?;
     Ok(serde_json::from_str(&content)?)
 }
 
@@ -9469,6 +9855,214 @@ fn cmd_stale(
     Ok(())
 }
 
+fn resolve_health_target_key(
+    file: &Path,
+    index_dir: &Path,
+    metrics_index: &DocumentMetricsIndex,
+) -> Option<String> {
+    let input = normalize_path(file);
+    let without_dot = input.trim_start_matches("./").to_string();
+    let with_dot = format!("./{}", without_dot);
+
+    for candidate in [&input, &without_dot, &with_dot] {
+        if metrics_index.files.contains_key(candidate) {
+            return Some(candidate.clone());
+        }
+    }
+
+    let absolute = canonicalize_existing_path(file);
+    let absolute_normalized = normalize_path(&absolute);
+    if metrics_index.files.contains_key(&absolute_normalized) {
+        return Some(absolute_normalized);
+    }
+
+    if let Ok(forward_index) = load_forward_index(index_dir) {
+        if let Some(source_root) = forward_index_source_root(&forward_index) {
+            let derived = build_indexed_doc_key(&absolute, &source_root);
+            if metrics_index.files.contains_key(&derived) {
+                return Some(derived);
+            }
+        }
+    }
+
+    None
+}
+
+fn evaluate_document_health(
+    metrics: &DocumentMetrics,
+    options: &HealthOptions,
+) -> HealthFileResult {
+    let mut issues = Vec::new();
+
+    if metrics.line_count > options.max_lines {
+        issues.push(HealthIssue {
+            kind: "bloated-file".to_string(),
+            severity: "error".to_string(),
+            message: format!(
+                "{} lines exceeds the configured threshold",
+                metrics.line_count
+            ),
+            value: metrics.line_count,
+            threshold: options.max_lines,
+        });
+    }
+
+    if metrics.part_heading_count >= options.max_part_sections {
+        issues.push(HealthIssue {
+            kind: "accumulator-pattern".to_string(),
+            severity: "error".to_string(),
+            message: format!(
+                "{} \"Part N\" headings suggest an accumulating narrative doc",
+                metrics.part_heading_count
+            ),
+            value: metrics.part_heading_count,
+            threshold: options.max_part_sections,
+        });
+    }
+
+    let completed_section_lines: usize = metrics
+        .sections
+        .iter()
+        .filter(|section| section.has_completion_marker)
+        .map(|section| section.line_count)
+        .sum();
+    if completed_section_lines > options.max_completed_lines {
+        issues.push(HealthIssue {
+            kind: "stale-completed".to_string(),
+            severity: "warning".to_string(),
+            message: format!(
+                "{} retained lines sit under completion-marked sections",
+                completed_section_lines
+            ),
+            value: completed_section_lines,
+            threshold: options.max_completed_lines,
+        });
+    }
+
+    if metrics.changelog_entry_count > options.max_changelog_entries {
+        issues.push(HealthIssue {
+            kind: "changelog-bloat".to_string(),
+            severity: "warning".to_string(),
+            message: format!(
+                "{} changelog-style entries exceed the configured threshold",
+                metrics.changelog_entry_count
+            ),
+            value: metrics.changelog_entry_count,
+            threshold: options.max_changelog_entries,
+        });
+    }
+
+    let status = if issues.iter().any(|issue| issue.severity == "error") {
+        "unhealthy"
+    } else if issues.iter().any(|issue| issue.severity == "warning") {
+        "warning"
+    } else {
+        "healthy"
+    };
+
+    HealthFileResult {
+        file: metrics.path.clone(),
+        status: status.to_string(),
+        issues,
+    }
+}
+
+fn cmd_health(
+    file: Option<&Path>,
+    all: bool,
+    index_dir: &Path,
+    options: &HealthOptions,
+    json: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    if all == file.is_some() {
+        return Err("pass either a file path or --all".into());
+    }
+
+    let metrics_index = load_document_metrics(index_dir)?;
+    let total_files = metrics_index.files.len();
+    let mut files = Vec::new();
+
+    if let Some(file_path) = file {
+        let key =
+            resolve_health_target_key(file_path, index_dir, &metrics_index).ok_or_else(|| {
+                format!(
+                    "File not found in document metrics index: {}",
+                    file_path.display()
+                )
+            })?;
+        let metrics = metrics_index.files.get(&key).ok_or_else(|| {
+            format!(
+                "File not found in document metrics index: {}",
+                file_path.display()
+            )
+        })?;
+        files.push(evaluate_document_health(metrics, options));
+    } else {
+        let mut all_results: Vec<HealthFileResult> = metrics_index
+            .files
+            .values()
+            .map(|metrics| evaluate_document_health(metrics, options))
+            .filter(|result| !result.issues.is_empty())
+            .collect();
+        all_results.sort_by(|a, b| a.file.cmp(&b.file).then_with(|| a.status.cmp(&b.status)));
+        files = all_results;
+    }
+
+    let unhealthy_files = files
+        .iter()
+        .filter(|file| file.status == "unhealthy")
+        .count();
+    let warning_files = files.iter().filter(|file| file.status == "warning").count();
+    let result = HealthResult {
+        total_files,
+        unhealthy_files,
+        warning_files,
+        files,
+    };
+
+    if json {
+        println!("{}", serde_json::to_string_pretty(&result)?);
+        return Ok(());
+    }
+
+    if result.files.is_empty() {
+        println!("{}", "✓ No health issues detected.".green().bold());
+        return Ok(());
+    }
+
+    for file_result in &result.files {
+        let label = match file_result.status.as_str() {
+            "unhealthy" => "UNHEALTHY".red().bold(),
+            "warning" => "WARNING".yellow().bold(),
+            _ => "HEALTHY".green().bold(),
+        };
+        println!(
+            "{}: {} ({} issue{})",
+            file_result.file,
+            label,
+            file_result.issues.len(),
+            if file_result.issues.len() == 1 {
+                ""
+            } else {
+                "s"
+            }
+        );
+        for issue in &file_result.issues {
+            println!(
+                "  {:<20} {:<7} {} (value: {}, threshold: {})",
+                issue.kind,
+                issue.severity.to_uppercase(),
+                issue.message,
+                issue.value,
+                issue.threshold
+            );
+        }
+        println!();
+    }
+
+    Ok(())
+}
+
 fn is_placeholder_target(target: &str) -> bool {
     let lower = target.to_ascii_lowercase();
 
@@ -10836,6 +11430,119 @@ See [summary](ASYNC_MIGRATION_COMPLETE_SUMMARY.md).
         // Different sections should have < 100% similarity
         let sim_different = simhash_similarity(sections1[0].simhash, sections3[0].simhash);
         assert!(sim_different < 1.0);
+    }
+
+    #[test]
+    fn test_compute_document_metrics_captures_structure_signals() {
+        let content = r#"---
+title: Demo
+owner: Docs
+---
+
+# Overview
+Intro paragraph.
+
+## Part 1
+- first
+- second
+
+## Changelog
+- Added feature
+- Fixed bug
+
+## Completed Work
+```rust
+fn main() {}
+```
+"#;
+        let lines: Vec<&str> = content.lines().collect();
+        let headings = vec![
+            Heading {
+                line: 6,
+                level: 1,
+                text: "Overview".to_string(),
+            },
+            Heading {
+                line: 9,
+                level: 2,
+                text: "Part 1".to_string(),
+            },
+            Heading {
+                line: 13,
+                level: 2,
+                text: "Changelog".to_string(),
+            },
+            Heading {
+                line: 17,
+                level: 2,
+                text: "Completed Work".to_string(),
+            },
+        ];
+        let links = vec![Link {
+            line: 7,
+            text: "readme".to_string(),
+            target: "README.md".to_string(),
+        }];
+
+        let metrics = compute_document_metrics("docs/demo.md", content, &lines, &headings, &links);
+
+        assert_eq!(metrics.path, "docs/demo.md");
+        assert_eq!(metrics.frontmatter_key_count, 2);
+        assert_eq!(metrics.heading_count, 4);
+        assert_eq!(metrics.section_count, 4);
+        assert_eq!(metrics.h1_count, 1);
+        assert_eq!(metrics.h2_count, 3);
+        assert_eq!(metrics.part_heading_count, 1);
+        assert_eq!(metrics.changelog_heading_count, 1);
+        assert_eq!(metrics.completion_heading_count, 1);
+        assert_eq!(metrics.changelog_entry_count, 2);
+        assert_eq!(metrics.list_item_count, 4);
+        assert_eq!(metrics.code_block_count, 1);
+        assert!(metrics.longest_section_lines >= 3);
+        assert!(metrics
+            .sections
+            .iter()
+            .any(|section| section.looks_like_part));
+        assert!(metrics
+            .sections
+            .iter()
+            .any(|section| section.looks_like_changelog && section.list_item_count == 2));
+    }
+
+    #[test]
+    fn test_cmd_build_writes_document_metrics_index() {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("yore-build-metrics-{unique}"));
+        let docs_dir = root.join("docs");
+        let index_dir = root.join(".yore");
+
+        fs::create_dir_all(&docs_dir).unwrap();
+        fs::write(
+            docs_dir.join("guide.md"),
+            "# Guide\n\n## Part 1\n- step one\n- step two\n",
+        )
+        .unwrap();
+
+        cmd_build(&docs_dir, &index_dir, "md", &[], true, None, false, false).unwrap();
+
+        let metrics_path = index_dir.join("document_metrics.json");
+        assert!(metrics_path.exists());
+
+        let metrics_index: DocumentMetricsIndex =
+            serde_json::from_str(&fs::read_to_string(metrics_path).unwrap()).unwrap();
+        assert_eq!(metrics_index.version, 1);
+        assert_eq!(metrics_index.files.len(), 1);
+
+        let metrics = metrics_index.files.values().next().unwrap();
+        assert_eq!(metrics.heading_count, 2);
+        assert_eq!(metrics.part_heading_count, 1);
+        assert_eq!(metrics.list_item_count, 2);
+        assert_eq!(metrics.section_count, 2);
+
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
