@@ -8,7 +8,7 @@ fn temp_dir(label: &str) -> PathBuf {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
         .as_nanos();
-    let dir = std::env::temp_dir().join(format!("yore-rel-{}-{}", label, nanos));
+    let dir = std::env::temp_dir().join(format!("yore-rel-{label}-{nanos}"));
     fs::create_dir_all(&dir).unwrap();
     dir
 }
@@ -258,8 +258,7 @@ fn test_self_links_excluded() {
     for edge in edges {
         assert_ne!(
             edge["source"], edge["target"],
-            "self-link edge found: {:?}",
-            edge
+            "self-link edge found: {edge:?}"
         );
     }
 }
@@ -303,7 +302,7 @@ fn test_paths_shows_edges_from_source() {
     let output = cmd.output().expect("paths failed");
     let stdout = String::from_utf8_lossy(&output.stdout);
 
-    assert!(output.status.success(), "paths failed: {}", stdout);
+    assert!(output.status.success(), "paths failed: {stdout}");
     assert!(stdout.contains("links_to"), "expected links_to in output");
     assert!(
         stdout.contains("api.md"),
@@ -379,8 +378,7 @@ fn test_assemble_use_relations() {
 
     assert!(
         output.status.success(),
-        "assemble --use-relations failed: {}",
-        stdout
+        "assemble --use-relations failed: {stdout}"
     );
     assert!(
         stdout.contains("Context Digest"),
@@ -408,7 +406,6 @@ fn test_assemble_use_relations_backward_compat() {
 
     assert!(
         output.status.success(),
-        "assemble --use-relations should not fail when relations.json is missing: {}",
-        stdout
+        "assemble --use-relations should not fail when relations.json is missing: {stdout}"
     );
 }

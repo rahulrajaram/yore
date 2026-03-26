@@ -1,3 +1,41 @@
+// Suppress errors about lints that exist in one clippy version but are
+// renamed/removed in another (e.g. match_on_vec_items removed in 1.94+).
+#![allow(renamed_and_removed_lints)]
+// Pedantic lint config: enable pedantic, then allow categories that are
+// not worth fixing across a 13K-line single-file CLI.
+#![warn(clippy::pedantic)]
+#![allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_precision_loss,
+    clippy::cast_sign_loss,
+    clippy::doc_markdown,
+    clippy::items_after_statements,
+    clippy::match_same_arms,
+    clippy::missing_errors_doc,
+    clippy::missing_panics_doc,
+    clippy::module_name_repetitions,
+    clippy::must_use_candidate,
+    clippy::needless_pass_by_value,
+    clippy::similar_names,
+    clippy::struct_excessive_bools,
+    clippy::struct_field_names,
+    clippy::too_many_lines,
+    clippy::unreadable_literal,
+    clippy::wildcard_imports,
+    // These are on already-lowercased strings; using Path::extension()
+    // would be less readable for our use case.
+    clippy::case_sensitive_file_extension_comparisons,
+    clippy::fn_params_excessive_bools,
+    clippy::float_cmp,
+    clippy::if_not_else,
+    clippy::option_if_let_else,
+    clippy::single_match_else,
+    clippy::unnecessary_wraps,
+    clippy::match_on_vec_items,
+    clippy::implicit_clone,
+    clippy::ref_option
+)]
+
 use ahash::AHasher;
 use clap::{Parser, Subcommand};
 use colored::Colorize;
@@ -2144,7 +2182,7 @@ fn resolve_build_params(
                 let rs: Vec<PathBuf> = profile_cfg.roots.iter().map(PathBuf::from).collect();
                 roots = Some(rs);
                 // Use repo root (".") as walk root when using multiple roots
-                effective_path = default_path.clone();
+                effective_path.clone_from(&default_path);
             }
 
             // Types: only override when CLI used the default
@@ -2197,7 +2235,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     // Handle SIGPIPE / broken pipe panics gracefully (e.g., when piping into `head`).
     let default_hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
-        let msg = format!("{}", info);
+        let msg = format!("{info}");
         if msg.contains("Broken pipe (os error 32)") {
             // Treat broken pipe as a normal early exit with success.
             std::process::exit(0);
@@ -2255,7 +2293,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
 
             // For now, `check` always prints JSON.
             let json_str = serde_json::to_string_pretty(&combined)?;
-            println!("{}", json_str);
+            println!("{json_str}");
 
             // CI/fail-on logic: allow both link kinds and policy severities.
             if ci && !fail_on.is_empty() {
@@ -2641,7 +2679,7 @@ fn cmd_build(
     let mut total_headings = 0;
     let mut total_links = 0;
 
-    for entry in builder.build().filter_map(|e| e.ok()) {
+    for entry in builder.build().filter_map(std::result::Result::ok) {
         let path = entry.path();
 
         // Skip directories
@@ -2667,7 +2705,7 @@ fn cmd_build(
         let ext = path
             .extension()
             .and_then(|e| e.to_str())
-            .map(|e| e.to_lowercase())
+            .map(str::to_lowercase)
             .unwrap_or_default();
 
         if !extensions.contains(&ext) {
@@ -2691,7 +2729,7 @@ fn cmd_build(
             let physical_path = canonicalize_existing_path(path);
             let rel_path = build_indexed_doc_key(&physical_path, &source_root);
             entry.path = physical_path.to_string_lossy().to_string();
-            metrics.path = rel_path.clone();
+            metrics.path.clone_from(&rel_path);
 
             // Update reverse index with heading keywords
             for keyword in &entry.keywords {
@@ -2826,7 +2864,7 @@ fn cmd_build(
         let rename_path = output.join("rename_history.json");
         fs::write(&rename_path, serde_json::to_string_pretty(&rename_history)?)?;
         if !quiet && !json {
-            println!("  Tracked {} file renames", count);
+            println!("  Tracked {count} file renames");
         }
         Some(count)
     } else {
@@ -2858,7 +2896,7 @@ fn cmd_build(
         println!("  Total headings:   {}", total_headings.to_string().cyan());
         println!("  Total links:      {}", total_links.to_string().cyan());
         println!("  Relations:        {}", relations_count.to_string().cyan());
-        println!("  Time elapsed:     {:.2?}", elapsed);
+        println!("  Time elapsed:     {elapsed:.2?}");
         println!();
         println!(
             "{} {}",
@@ -2885,7 +2923,7 @@ fn index_file(path: &Path) -> Result<(FileEntry, DocumentMetrics), Box<dyn std::
         if let Some(caps) = heading_re.captures(line) {
             headings.push(Heading {
                 line: i + 1,
-                level: caps.get(1).map(|m| m.as_str().len()).unwrap_or(1),
+                level: caps.get(1).map_or(1, |m| m.as_str().len()),
                 text: caps
                     .get(2)
                     .map(|m| m.as_str().to_string())
@@ -2981,7 +3019,7 @@ fn index_file(path: &Path) -> Result<(FileEntry, DocumentMetrics), Box<dyn std::
                 adr_references.push(AdrRef {
                     line: i + 1,
                     raw_text: caps.get(0).unwrap().as_str().to_string(),
-                    normalized_id: format!("{:03}", num_val),
+                    normalized_id: format!("{num_val:03}"),
                 });
             }
         }
@@ -3135,14 +3173,7 @@ fn heading_looks_like_part(text: &str) -> bool {
         && trimmed
             .split_whitespace()
             .nth(1)
-            .map(|token| {
-                token
-                    .chars()
-                    .next()
-                    .map(|ch| ch.is_ascii_digit())
-                    .unwrap_or(false)
-            })
-            .unwrap_or(false)
+            .is_some_and(|token| token.chars().next().is_some_and(|ch| ch.is_ascii_digit()))
 }
 
 fn heading_has_completion_marker(text: &str) -> bool {
@@ -3191,8 +3222,7 @@ fn compute_section_metrics(
         let start = headings[idx].line.saturating_sub(1);
         let end = headings
             .get(idx + 1)
-            .map(|heading| heading.line.saturating_sub(1))
-            .unwrap_or(lines.len());
+            .map_or(lines.len(), |heading| heading.line.saturating_sub(1));
         let section_lines = &lines[start..end];
         let section_text = section_lines.join("\n");
         let line_start = start + 1;
@@ -3414,7 +3444,7 @@ fn hamming_distance(a: u64, b: u64) -> u32 {
 /// Convert hamming distance to similarity (0.0 to 1.0)
 fn simhash_similarity(a: u64, b: u64) -> f64 {
     let distance = hamming_distance(a, b);
-    1.0 - (distance as f64 / 64.0)
+    1.0 - (f64::from(distance) / 64.0)
 }
 
 /// Index sections of a document with SimHash fingerprints
@@ -3430,8 +3460,7 @@ fn index_sections(content: &str, headings: &[Heading]) -> Vec<SectionFingerprint
         let start = headings[i].line.saturating_sub(1);
         let end = headings
             .get(i + 1)
-            .map(|h| h.line.saturating_sub(1))
-            .unwrap_or(lines.len());
+            .map_or(lines.len(), |h| h.line.saturating_sub(1));
 
         // Extract section text
         let section_text = lines[start..end].join("\n");
@@ -3629,7 +3658,7 @@ fn print_query_diagnostics(
     if include_scoring {
         let mut idf_parts = Vec::new();
         for (term, stem, idf) in &diagnostics.idf_values {
-            idf_parts.push(format!("{}->{}:{:.3}", term, stem, idf));
+            idf_parts.push(format!("{term}->{stem}:{idf:.3}"));
         }
         println!(
             "  {} {}",
@@ -3731,7 +3760,7 @@ fn cmd_query(
         );
         let mut candidates = file_scores[..candidate_cap].to_vec();
 
-        for (path, score) in candidates.iter_mut() {
+        for (path, score) in &mut candidates {
             let content = std::fs::read_to_string(Path::new(path)).unwrap_or_default();
             let content_terms = extract_keywords_with_options(&content, false);
             let mut matched_phrases = 0usize;
@@ -3842,7 +3871,7 @@ fn cmd_query(
 
     for (file, score) in results {
         if options.files_only {
-            println!("{}", file);
+            println!("{file}");
         } else {
             println!("{} (score: {:.2})", file.cyan(), score);
 
@@ -3927,7 +3956,7 @@ fn cmd_similar(
                 .get(&file_without_dot)
                 .map(|e| (file_without_dot.clone(), e))
         })
-        .ok_or_else(|| format!("File not in index: {}", file_str))?;
+        .ok_or_else(|| format!("File not in index: {file_str}"))?;
 
     // Combine heading and body keywords
     let ref_keywords: HashSet<String> = ref_entry
@@ -4334,9 +4363,8 @@ fn build_consolidation_groups(
             }
         }
 
-        let (canonical, canonical_score) = match best {
-            Some(v) => v,
-            None => continue,
+        let Some((canonical, canonical_score)) = best else {
+            continue;
         };
 
         let mut merge_into: Vec<String> = component
@@ -4586,7 +4614,7 @@ fn cmd_diff(
             shared_headings.len()
         );
         for h in shared_headings.iter().take(10) {
-            println!("  - {}", h);
+            println!("  - {h}");
         }
         if shared_headings.len() > 10 {
             println!("  ... and {} more", shared_headings.len() - 10);
@@ -4644,7 +4672,7 @@ fn cmd_dupes_sections(
 
     let mut clusters: Vec<SectionCluster> = Vec::new();
 
-    for section in all_sections.iter() {
+    for section in &all_sections {
         let mut best_cluster_idx: Option<usize> = None;
         let mut best_similarity = 0.0;
 
@@ -4847,10 +4875,7 @@ fn cmd_stats(
     );
     println!("  Indexed at:        {}", forward_index.indexed_at.dimmed());
     println!();
-    println!(
-        "{}",
-        format!("Top {} Keywords", top_keywords).green().bold()
-    );
+    println!("{}", format!("Top {top_keywords} Keywords").green().bold());
     println!();
 
     for (keyword, count) in keyword_counts.iter().take(top_keywords) {
@@ -5062,7 +5087,7 @@ fn cmd_vocabulary(
     });
 
     let mut terms = Vec::new();
-    for candidate in candidates.iter() {
+    for candidate in &candidates {
         let term = if let Some(surface) = &candidate.surface {
             surface
         } else if options.include_stemming {
@@ -5111,7 +5136,7 @@ fn cmd_vocabulary(
             println!("{}", render_vocabulary_prompt(&result.terms));
             Ok(())
         }
-        _ => Err(format!("Unsupported vocabulary format: {}", effective_format).into()),
+        _ => Err(format!("Unsupported vocabulary format: {effective_format}").into()),
     }
 }
 
@@ -5450,7 +5475,7 @@ fn load_vocabulary_stopwords(
 ) -> Result<HashSet<String>, Box<dyn std::error::Error>> {
     let mut words: HashSet<String> = default_vocabulary_stop_words()
         .iter()
-        .map(|word| word.to_string())
+        .map(|word| (*word).to_string())
         .collect();
 
     if !include_default {
@@ -5460,7 +5485,7 @@ fn load_vocabulary_stopwords(
     if let Some(path) = stopwords {
         let path_value = path.to_string_lossy().to_string();
         let content = fs::read_to_string(path)
-            .map_err(|err| format!("Unable to read stop-word file '{}': {}", path_value, err))?;
+            .map_err(|err| format!("Unable to read stop-word file '{path_value}': {err}"))?;
 
         for token in content.split_whitespace() {
             if !token.is_empty() {
@@ -5561,7 +5586,7 @@ fn extract_git_renames(path: &Path) -> RenameHistory {
         // Check if this is a commit hash (40 hex chars)
         if line.len() == 40 && line.chars().all(|c| c.is_ascii_hexdigit()) {
             current_commit = line.to_string();
-        } else if line.starts_with("R") {
+        } else if line.starts_with('R') {
             // Rename line: R<score>\told_path\tnew_path
             let parts: Vec<&str> = line.splitn(3, '\t').collect();
             if parts.len() == 3 {
@@ -5591,7 +5616,7 @@ fn resolve_renamed_path(old_path: &str, history: &RenameHistory) -> Option<Strin
 
     for entry in &history.renames {
         if entry.old_path == current {
-            current = entry.new_path.clone();
+            current.clone_from(&entry.new_path);
             found_any = true;
         }
     }
@@ -5742,10 +5767,10 @@ fn build_indexed_doc_key(path: &Path, source_root: &Path) -> String {
     }
 
     let normalized = normalize_path(path);
-    if !normalized.is_empty() {
-        normalized
-    } else {
+    if normalized.is_empty() {
         path.to_string_lossy().to_string()
+    } else {
+        normalized
     }
 }
 
@@ -5868,7 +5893,7 @@ fn build_mcp_store_namespace(index_dir: &Path) -> String {
     let canonical = canonicalize_existing_path(index_dir);
     let mut state = FNV_OFFSET_BASIS;
     stable_mcp_hash_update(&mut state, canonical.to_string_lossy().as_bytes());
-    format!("{:016x}", state)
+    format!("{state:016x}")
 }
 
 fn fallback_mcp_handle_dir(index_dir: &Path) -> PathBuf {
@@ -5910,7 +5935,7 @@ fn build_mcp_handle(query: &str, section: &SectionMatch) -> String {
     stable_mcp_hash_update(&mut state, &[0xff]);
     stable_mcp_hash_update(&mut state, section.content.as_bytes());
 
-    format!("ctx_{:016x}", state)
+    format!("ctx_{state:016x}")
 }
 
 fn build_mcp_source_ref(section: &SectionMatch) -> McpSourceRef {
@@ -5931,7 +5956,7 @@ fn store_mcp_artifact(
 
     for handle_dir in candidate_mcp_handle_dirs(index_dir) {
         match fs::create_dir_all(&handle_dir) {
-            Ok(_) => {}
+            Ok(()) => {}
             Err(err) => {
                 last_error = Some(err);
                 continue;
@@ -5940,7 +5965,7 @@ fn store_mcp_artifact(
 
         let handle_path = handle_dir.join(format!("{}.json", artifact.handle));
         match fs::write(handle_path, &payload) {
-            Ok(_) => return Ok(()),
+            Ok(()) => return Ok(()),
             Err(err) => {
                 last_error = Some(err);
             }
@@ -5959,7 +5984,7 @@ fn load_mcp_artifact(
     let mut last_error: Option<io::Error> = None;
 
     for handle_dir in candidate_mcp_handle_dirs(index_dir) {
-        let handle_path = handle_dir.join(format!("{}.json", handle));
+        let handle_path = handle_dir.join(format!("{handle}.json"));
         match fs::read_to_string(&handle_path) {
             Ok(content) => return Ok(serde_json::from_str(&content)?),
             Err(err) if err.kind() == io::ErrorKind::NotFound => {
@@ -6043,7 +6068,7 @@ fn search_relevant_sections(
                         let section_content = lines[start..end].join("\n");
 
                         all_sections.push(SectionMatch {
-                            doc_path: doc_path.to_string(),
+                            doc_path: (*doc_path).to_string(),
                             heading: section.heading.clone(),
                             line_start: section.line_start,
                             line_end: section.line_end,
@@ -6058,7 +6083,7 @@ fn search_relevant_sections(
             // Fallback: treat whole doc as one section
             if let Ok(content) = read_indexed_doc(index, doc_path, entry) {
                 all_sections.push(SectionMatch {
-                    doc_path: doc_path.to_string(),
+                    doc_path: (*doc_path).to_string(),
                     heading: "Full Document".to_string(),
                     line_start: 1,
                     line_end: content.lines().count(),
@@ -6231,13 +6256,12 @@ fn distill_to_markdown(sections: &[SectionMatch], query: &str, max_tokens: usize
          - 0.70-0.89: Reliable, current documentation\n\
          - 0.50-0.69: Secondary or supporting documentation\n\
          - <0.50: Potentially stale, use with caution\n\n\
-         **Actual Tokens Used:** ~{}\n\n\
+         **Actual Tokens Used:** ~{used_tokens}\n\n\
          ---\n\n\
          ## Usage with LLM\n\n\
          Paste this digest into your LLM conversation, then ask:\n\n\
-         > Using only the information in the context above, answer: \"{}\"\n\
-         > Be explicit when something is not documented in the context.\n",
-        used_tokens, query
+         > Using only the information in the context above, answer: \"{query}\"\n\
+         > Be explicit when something is not documented in the context.\n"
     );
 
     output.push_str(&footer);
@@ -6262,7 +6286,7 @@ fn build_adr_index(index: &ForwardIndex) -> HashMap<String, String> {
                 if let Some(num_str) = caps.get(1) {
                     // Zero-pad to 3 digits
                     let num: usize = num_str.as_str().parse().unwrap_or(0);
-                    let normalized = format!("{:03}", num);
+                    let normalized = format!("{num:03}");
                     adr_map.insert(normalized, path.clone());
                 }
             }
@@ -6440,10 +6464,8 @@ fn parse_markdown_links(section: &SectionMatch, origin_dir: &Path) -> Vec<CrossR
             };
 
             // Skip non-markdown links
-            if !path_part.ends_with(".md")
-                && !path_part.ends_with(".txt")
-                && !path_part.ends_with(".rst")
-            {
+            let lc = path_part.to_ascii_lowercase();
+            if !lc.ends_with(".md") && !lc.ends_with(".txt") && !lc.ends_with(".rst") {
                 continue;
             }
 
@@ -6536,7 +6558,7 @@ fn parse_adr_ids(section: &SectionMatch, adr_index: &HashMap<String, String>) ->
             let num_val: usize = num_str.parse().unwrap_or(0);
 
             // Zero-pad to 3 digits
-            let normalized = format!("{:03}", num_val);
+            let normalized = format!("{num_val:03}");
 
             // Lookup in ADR index
             if let Some(target_path) = adr_index.get(&normalized) {
@@ -6942,9 +6964,8 @@ fn resolve_crossrefs(
         }
 
         // Get file entry
-        let entry = match index.files.get(&target_path) {
-            Some(e) => e,
-            None => continue, // Doc not in index
+        let Some(entry) = index.files.get(&target_path) else {
+            continue; // Doc not in index
         };
 
         let doc_type = classify_target_doc(&target_path);
@@ -7038,9 +7059,8 @@ fn resolve_crossrefs_from_relations(
             continue;
         }
 
-        let entry = match index.files.get(&target_path) {
-            Some(e) => e,
-            None => continue,
+        let Some(entry) = index.files.get(&target_path) else {
+            continue;
         };
 
         // Pick anchor from first edge that has one
@@ -7102,7 +7122,7 @@ fn split_sentences(text: &str) -> Vec<String> {
     for (i, caps) in code_block_re.captures_iter(text).enumerate() {
         let code = caps.get(0).unwrap().as_str();
         code_blocks.push(code.to_string());
-        placeholder_text = placeholder_text.replace(code, &format!("__CODE_BLOCK_{}__", i));
+        placeholder_text = placeholder_text.replace(code, &format!("__CODE_BLOCK_{i}__"));
     }
 
     // Split on sentence boundaries: period/exclamation/question followed by space
@@ -7123,7 +7143,7 @@ fn split_sentences(text: &str) -> Vec<String> {
 
     // Restore code blocks
     for (i, code) in code_blocks.iter().enumerate() {
-        let placeholder = format!("__CODE_BLOCK_{}__", i);
+        let placeholder = format!("__CODE_BLOCK_{i}__");
         for sentence in &mut sentences {
             *sentence = sentence.replace(&placeholder, code);
         }
@@ -7157,7 +7177,7 @@ fn score_sentence(
             overlap_count += 1;
         }
     }
-    score += overlap_count as f64 * W_LEXICAL;
+    score += f64::from(overlap_count) * W_LEXICAL;
 
     // 2. High-value keywords
     let keywords = [
@@ -7293,7 +7313,7 @@ fn refine_section(
 
     // Check if section has cross-references
     let has_crossref =
-        body.to_lowercase().contains("adr") || body.contains("[") && body.contains("](");
+        body.to_lowercase().contains("adr") || body.contains('[') && body.contains("](");
 
     // Score each sentence
     let mut scored_sentences: Vec<(String, f64)> = sentences
@@ -7622,7 +7642,7 @@ fn build_mcp_search_response(
                 ),
                 ContextSelectionIssue::NoRelevantSections(label) => (
                     Some("no_relevant_sections".to_string()),
-                    Some(format!("No relevant sections found for query: \"{}\"", label)),
+                    Some(format!("No relevant sections found for query: \"{label}\"")),
                     Vec::new(),
                 ),
             };
@@ -7743,8 +7763,7 @@ fn build_mcp_search_response(
                 results,
                 error: Some("artifact_store_unavailable".to_string()),
                 message: Some(format!(
-                    "Unable to persist MCP handles for follow-up fetches: {}",
-                    err
+                    "Unable to persist MCP handles for follow-up fetches: {err}"
                 )),
                 missing_files: Vec::new(),
             });
@@ -7808,28 +7827,24 @@ fn build_mcp_fetch_response(
     index_dir: &Path,
     options: McpFetchOptions,
 ) -> Result<McpFetchResponse, Box<dyn std::error::Error>> {
-    let artifact = match load_mcp_artifact(index_dir, handle) {
-        Ok(artifact) => artifact,
-        Err(_) => {
-            return Ok(McpFetchResponse {
-                schema_version: MCP_SCHEMA_VERSION,
-                tool: "fetch_context".to_string(),
-                handle: handle.to_string(),
-                budget: McpFetchBudget {
-                    max_tokens: options.max_tokens,
-                    max_bytes: options.max_bytes,
-                    ..McpFetchBudget::default()
-                },
-                pressure: McpPressure::default(),
-                query: None,
-                result: None,
-                error: Some("unknown_handle".to_string()),
-                message: Some(format!(
-                    "No stored MCP artifact found for handle '{}'. Run `yore mcp search-context` first.",
-                    handle
-                )),
-            });
-        }
+    let Ok(artifact) = load_mcp_artifact(index_dir, handle) else {
+        return Ok(McpFetchResponse {
+            schema_version: MCP_SCHEMA_VERSION,
+            tool: "fetch_context".to_string(),
+            handle: handle.to_string(),
+            budget: McpFetchBudget {
+                max_tokens: options.max_tokens,
+                max_bytes: options.max_bytes,
+                ..McpFetchBudget::default()
+            },
+            pressure: McpPressure::default(),
+            query: None,
+            result: None,
+            error: Some("unknown_handle".to_string()),
+            message: Some(format!(
+                "No stored MCP artifact found for handle '{handle}'. Run `yore mcp search-context` first."
+            )),
+        });
     };
 
     let (content, truncated, truncation_reasons) =
@@ -7904,7 +7919,7 @@ fn read_mcp_stdio_message<R: BufRead>(
                 content_length = Some(value.trim().parse().map_err(|err| {
                     io::Error::new(
                         io::ErrorKind::InvalidData,
-                        format!("invalid Content-Length header: {}", err),
+                        format!("invalid Content-Length header: {err}"),
                     )
                 })?);
             }
@@ -8075,7 +8090,7 @@ fn cmd_mcp_serve(index_dir: &Path) -> Result<(), Box<dyn std::error::Error>> {
         let request: JsonRpcRequest = match serde_json::from_value(message) {
             Ok(request) => request,
             Err(err) => {
-                let response = json_rpc_error(None, -32600, &format!("Invalid request: {}", err));
+                let response = json_rpc_error(None, -32600, &format!("Invalid request: {err}"));
                 write_mcp_stdio_message(&mut writer, &response)?;
                 continue;
             }
@@ -8153,7 +8168,7 @@ fn cmd_mcp_serve(index_dir: &Path) -> Result<(), Box<dyn std::error::Error>> {
                                     json_rpc_error(
                                         Some(id),
                                         -32602,
-                                        &format!("Invalid search_context arguments: {}", err),
+                                        &format!("Invalid search_context arguments: {err}"),
                                     )
                                 }),
                             }
@@ -8178,20 +8193,20 @@ fn cmd_mcp_serve(index_dir: &Path) -> Result<(), Box<dyn std::error::Error>> {
                                     json_rpc_error(
                                         Some(id),
                                         -32602,
-                                        &format!("Invalid fetch_context arguments: {}", err),
+                                        &format!("Invalid fetch_context arguments: {err}"),
                                     )
                                 }),
                             }
                         }
                         _ => id.map(|id| {
-                            json_rpc_error(Some(id), -32602, &format!("Unknown tool '{}'.", name))
+                            json_rpc_error(Some(id), -32602, &format!("Unknown tool '{name}'."))
                         }),
                     },
                     Err(err) => id.map(|id| {
                         json_rpc_error(
                             Some(id),
                             -32602,
-                            &format!("Invalid tools/call params: {}", err),
+                            &format!("Invalid tools/call params: {err}"),
                         )
                     }),
                 }
@@ -8239,7 +8254,7 @@ fn cmd_assemble(
                         .yellow()
                 );
                 for path in missing {
-                    eprintln!("  - {}", path);
+                    eprintln!("  - {path}");
                 }
                 return Ok(());
             }
@@ -8248,7 +8263,7 @@ fn cmd_assemble(
                 return Ok(());
             }
             Err(ContextSelectionIssue::NoRelevantSections(label)) => {
-                println!("# No relevant sections found for query: \"{}\"", label);
+                println!("# No relevant sections found for query: \"{label}\"");
                 return Ok(());
             }
         };
@@ -8352,7 +8367,7 @@ fn cmd_assemble(
         .collect();
     let digest = distill_to_markdown(&digest_sections, &query_label, options.max_tokens);
 
-    println!("{}", digest);
+    println!("{digest}");
 
     Ok(())
 }
@@ -8536,10 +8551,7 @@ fn cmd_eval(
     // Print summary
     println!("{}", "=".repeat(60));
     println!("{}", "Summary".cyan().bold());
-    println!(
-        "  Passed: {}/{} ({:.0}%)",
-        passed_count, total, pass_rate_pct
-    );
+    println!("  Passed: {passed_count}/{total} ({pass_rate_pct:.0}%)");
     println!("  Failed: {}/{}", total - passed_count, total);
     println!();
 
@@ -8683,7 +8695,7 @@ fn run_link_check(
                     line_number,
                     link_text: link.text.clone(),
                     link_target: target.clone(),
-                    error: format!("Placeholder link target: {}", link_path),
+                    error: format!("Placeholder link target: {link_path}"),
                     anchor: anchor.clone(),
                     context,
                 });
@@ -8694,7 +8706,7 @@ fn run_link_check(
             if !link_path.is_empty() {
                 let meta = fs::metadata(&normalized_path).ok();
                 let exists = meta.is_some();
-                let is_dir = meta.as_ref().map(|m| m.is_dir()).unwrap_or(false);
+                let is_dir = meta.as_ref().is_some_and(std::fs::Metadata::is_dir);
 
                 if exists && is_dir {
                     // Valid directory reference
@@ -8772,7 +8784,7 @@ fn run_link_check(
                         line_number,
                         link_text: link.text.clone(),
                         link_target: target.clone(),
-                        error: format!("Target file not found: {}", normalized_path),
+                        error: format!("Target file not found: {normalized_path}"),
                         anchor: anchor.clone(),
                         context,
                     });
@@ -8804,7 +8816,7 @@ fn run_link_check(
                             line_number,
                             link_text: link.text.clone(),
                             link_target: target.clone(),
-                            error: format!("Anchor not found: #{}", anchor_text),
+                            error: format!("Anchor not found: #{anchor_text}"),
                             anchor: Some(anchor_text.clone()),
                             context,
                         });
@@ -8819,8 +8831,7 @@ fn run_link_check(
                         link_text: link.text.clone(),
                         link_target: target.clone(),
                         error: format!(
-                            "Could not verify anchor (file has no headings): #{}",
-                            anchor_text
+                            "Could not verify anchor (file has no headings): #{anchor_text}"
                         ),
                         anchor: Some(anchor_text.clone()),
                         context,
@@ -8943,7 +8954,7 @@ fn cmd_check_links(
                 println!("    Line: {}", link.line_number);
             }
             if let Some(ref ctx) = link.context {
-                println!("    Context: {}", ctx);
+                println!("    Context: {ctx}");
             }
             println!("    Error: {}", link.error.red());
             println!();
@@ -8966,7 +8977,10 @@ fn get_link_context(
     // Load and cache file lines if needed
     if !cache.contains_key(file_path) {
         let content = fs::read_to_string(file_path)?;
-        let lines: Vec<String> = content.lines().map(|s| s.to_string()).collect();
+        let lines: Vec<String> = content
+            .lines()
+            .map(std::string::ToString::to_string)
+            .collect();
         cache.insert(file_path.to_string(), lines);
     }
 
@@ -9019,8 +9033,7 @@ fn parse_policy_sections(content: &str) -> Vec<PolicySection> {
         if let Some(caps) = heading_re.captures(line) {
             let heading = caps
                 .get(2)
-                .map(|m| m.as_str().trim().to_string())
-                .unwrap_or_else(|| "Untitled".to_string());
+                .map_or_else(|| "Untitled".to_string(), |m| m.as_str().trim().to_string());
 
             if let Some(mut prev) = current.take() {
                 if idx > 0 {
@@ -9098,10 +9111,8 @@ fn extract_markdown_link_targets(file_path: &str, content: &str) -> Vec<LinkTarg
             continue;
         }
 
-        if !path_part.ends_with(".md")
-            && !path_part.ends_with(".txt")
-            && !path_part.ends_with(".rst")
-        {
+        let lc = path_part.to_ascii_lowercase();
+        if !lc.ends_with(".md") && !lc.ends_with(".txt") && !lc.ends_with(".rst") {
             continue;
         }
 
@@ -9172,7 +9183,7 @@ fn collect_policy_violations_for_content(
             violations.push(PolicyViolation {
                 file: file_path.to_string(),
                 rule: rule_name(rule),
-                message: format!("Missing required content: {:?}", needle),
+                message: format!("Missing required content: {needle:?}"),
                 severity: rule_severity(rule),
                 kind: "policy_violation".to_string(),
             });
@@ -9185,7 +9196,7 @@ fn collect_policy_violations_for_content(
             violations.push(PolicyViolation {
                 file: file_path.to_string(),
                 rule: rule_name(rule),
-                message: format!("Forbidden content present: {:?}", needle),
+                message: format!("Forbidden content present: {needle:?}"),
                 severity: rule_severity(rule),
                 kind: "policy_violation".to_string(),
             });
@@ -9200,8 +9211,7 @@ fn collect_policy_violations_for_content(
                 file: file_path.to_string(),
                 rule: rule_name(rule),
                 message: format!(
-                    "Document too short: {} lines (min required: {})",
-                    line_count, min_len
+                    "Document too short: {line_count} lines (min required: {min_len})"
                 ),
                 severity: rule_severity(rule),
                 kind: "policy_violation".to_string(),
@@ -9213,10 +9223,7 @@ fn collect_policy_violations_for_content(
             violations.push(PolicyViolation {
                 file: file_path.to_string(),
                 rule: rule_name(rule),
-                message: format!(
-                    "Document too long: {} lines (max allowed: {})",
-                    line_count, max_len
-                ),
+                message: format!("Document too long: {line_count} lines (max allowed: {max_len})"),
                 severity: rule_severity(rule),
                 kind: "policy_violation".to_string(),
             });
@@ -9243,7 +9250,7 @@ fn collect_policy_violations_for_content(
                 violations.push(PolicyViolation {
                     file: file_path.to_string(),
                     rule: rule_name(rule),
-                    message: format!("Missing required heading: {:?}", h),
+                    message: format!("Missing required heading: {h:?}"),
                     severity: rule_severity(rule),
                     kind: "policy_violation".to_string(),
                 });
@@ -9256,7 +9263,7 @@ fn collect_policy_violations_for_content(
                 violations.push(PolicyViolation {
                     file: file_path.to_string(),
                     rule: rule_name(rule),
-                    message: format!("Forbidden heading present: {:?}", h),
+                    message: format!("Forbidden heading present: {h:?}"),
                     severity: rule_severity(rule),
                     kind: "policy_violation".to_string(),
                 });
@@ -9273,7 +9280,7 @@ fn collect_policy_violations_for_content(
                     violations.push(PolicyViolation {
                         file: file_path.to_string(),
                         rule: rule_name(rule),
-                        message: format!("Invalid section heading regex: {:?}", pattern),
+                        message: format!("Invalid section heading regex: {pattern:?}"),
                         severity: rule_severity(rule),
                         kind: "policy_violation".to_string(),
                     });
@@ -9329,7 +9336,7 @@ fn collect_policy_violations_for_content(
         for required in &rule.must_link_to {
             let (req_path, req_anchor) = normalize_required_link(file_path, required);
             let satisfied = if let Some(anchor) = req_anchor {
-                target_keys.contains(&format!("{}#{}", req_path, anchor))
+                target_keys.contains(&format!("{req_path}#{anchor}"))
             } else {
                 target_paths.contains(&req_path)
             };
@@ -9338,7 +9345,7 @@ fn collect_policy_violations_for_content(
                 violations.push(PolicyViolation {
                     file: file_path.to_string(),
                     rule: rule_name(rule),
-                    message: format!("Missing required link: {:?}", required),
+                    message: format!("Missing required link: {required:?}"),
                     severity: rule_severity(rule),
                     kind: "policy_violation".to_string(),
                 });
@@ -9442,9 +9449,8 @@ fn find_link_candidates(
         return vec![];
     }
 
-    let link_filename = match Path::new(link_path).file_name().and_then(|s| s.to_str()) {
-        Some(f) => f,
-        None => return vec![],
+    let Some(link_filename) = Path::new(link_path).file_name().and_then(|s| s.to_str()) else {
+        return vec![];
     };
 
     let source_path = Path::new(source_file);
@@ -9457,8 +9463,7 @@ fn find_link_candidates(
             Path::new(p)
                 .file_name()
                 .and_then(|s| s.to_str())
-                .map(|name| name == link_filename)
-                .unwrap_or(false)
+                .is_some_and(|name| name == link_filename)
         })
         .map(|candidate| {
             // Try to create a relative path from source to candidate
@@ -9831,8 +9836,8 @@ fn apply_link_decisions(
 }
 
 fn apply_reference_mapping_to_content(content: &str, from: &str, to: &str) -> String {
-    let old = format!("]({})", from);
-    let new = format!("]({})", to);
+    let old = format!("]({from})");
+    let new = format!("]({to})");
     content.replace(&old, &new)
 }
 
@@ -9927,7 +9932,7 @@ fn cmd_fix_references(
             mapping_path.display()
         );
         for f in changed_files {
-            println!("  {}", f);
+            println!("  {f}");
         }
     }
 
@@ -10020,9 +10025,9 @@ fn cmd_mv(
             );
             for file in updated_files {
                 if dry_run {
-                    println!("  {} (references would change)", file);
+                    println!("  {file} (references would change)");
                 } else {
-                    println!("  {}", file);
+                    println!("  {file}");
                 }
             }
         }
@@ -10083,7 +10088,7 @@ fn cmd_paths(
     let relation_index = load_relation_index(index_dir);
     if relation_index.edges.is_empty() {
         if json {
-            println!("{{\"source\":\"{}\",\"paths\":[]}}", source);
+            println!("{{\"source\":\"{source}\",\"paths\":[]}}");
         } else {
             println!(
                 "{} No relations found. Run 'yore build' first.",
@@ -10106,23 +10111,22 @@ fn cmd_paths(
         source.to_string()
     } else {
         // Try suffix match
-        match all_sources
+        if let Some(s) = all_sources
             .iter()
             .find(|s| s.ends_with(source) || source.ends_with(*s))
         {
-            Some(s) => s.to_string(),
-            None => {
-                if json {
-                    println!("{{\"source\":\"{}\",\"paths\":[]}}", source);
-                } else {
-                    println!(
-                        "{} '{}' not found in relation graph.",
-                        "Info:".yellow(),
-                        source
-                    );
-                }
-                return Ok(());
+            (*s).to_string()
+        } else {
+            if json {
+                println!("{{\"source\":\"{source}\",\"paths\":[]}}");
+            } else {
+                println!(
+                    "{} '{}' not found in relation graph.",
+                    "Info:".yellow(),
+                    source
+                );
             }
+            return Ok(());
         }
     };
 
@@ -10195,16 +10199,20 @@ fn cmd_paths(
                 };
                 let mut detail = String::new();
                 if let Some(anchor) = &edge.anchor {
-                    detail.push_str(&format!(" #{}", anchor));
+                    use std::fmt::Write;
+                    let _ = write!(detail, " #{anchor}");
                 }
                 if let Some(src_sec) = &edge.source_section {
-                    detail.push_str(&format!(" [from: {}]", src_sec.heading));
+                    use std::fmt::Write;
+                    let _ = write!(detail, " [from: {}]", src_sec.heading);
                 }
                 if let Some(tgt_sec) = &edge.target_section {
-                    detail.push_str(&format!(" [to: {}]", tgt_sec.heading));
+                    use std::fmt::Write;
+                    let _ = write!(detail, " [to: {}]", tgt_sec.heading);
                 }
                 if let Some(raw) = &edge.raw_text {
-                    detail.push_str(&format!(" ({})", raw));
+                    use std::fmt::Write;
+                    let _ = write!(detail, " ({raw})");
                 }
                 println!(
                     "  {} {} -> {}{}",
@@ -10310,15 +10318,15 @@ fn cmd_export_graph(index_dir: &Path, format: &str) -> Result<(), Box<dyn std::e
                 let dst = edge.target.replace('"', "\\\"");
                 if let Some(anchor) = &edge.anchor {
                     let label = anchor.replace('"', "\\\"");
-                    println!("  \"{}\" -> \"{}\" [label=\"{}\"];", src, dst, label);
+                    println!("  \"{src}\" -> \"{dst}\" [label=\"{label}\"];");
                 } else {
-                    println!("  \"{}\" -> \"{}\";", src, dst);
+                    println!("  \"{src}\" -> \"{dst}\";");
                 }
             }
             println!("}}");
         }
         other => {
-            return Err(format!("Unsupported format: {}", other).into());
+            return Err(format!("Unsupported format: {other}").into());
         }
     }
 
@@ -10411,7 +10419,7 @@ fn resolve_health_target_key(
 ) -> Option<String> {
     let input = normalize_path(file);
     let without_dot = input.trim_start_matches("./").to_string();
-    let with_dot = format!("./{}", without_dot);
+    let with_dot = format!("./{without_dot}");
 
     for candidate in [&input, &without_dot, &with_dot] {
         if metrics_index.files.contains_key(candidate) {
@@ -10480,8 +10488,7 @@ fn evaluate_document_health(
             kind: "stale-completed".to_string(),
             severity: "warning".to_string(),
             message: format!(
-                "{} retained lines sit under completion-marked sections",
-                completed_section_lines
+                "{completed_section_lines} retained lines sit under completion-marked sections"
             ),
             value: completed_section_lines,
             threshold: options.max_completed_lines,
@@ -10778,7 +10785,7 @@ fn cmd_backlinks(
                     backlink.link_text, backlink.link_target
                 );
                 if let Some(anchor) = &backlink.anchor {
-                    println!("    Anchor: #{}", anchor);
+                    println!("    Anchor: #{anchor}");
                 }
                 println!();
             }
@@ -11029,7 +11036,7 @@ fn cmd_canonical_orphans(
     println!("{}", "Canonical Orphans".cyan().bold());
     println!("{}", "=".repeat(60));
     println!();
-    println!("Threshold: {}", threshold);
+    println!("Threshold: {threshold}");
     println!("Total canonical orphans: {}", orphans.len());
     println!();
 
@@ -11176,7 +11183,7 @@ fn cmd_canonicality(
         for file in high_canon.iter().take(10) {
             println!("  [{:.2}] {}", file.score, file.file.white().bold());
             for reason in &file.reasons {
-                println!("         - {}", reason);
+                println!("         - {reason}");
             }
         }
         if high_canon.len() > 10 {
@@ -11205,7 +11212,7 @@ fn cmd_canonicality(
         for file in low_canon.iter().take(5) {
             println!("  [{:.2}] {}", file.score, file.file);
             for reason in &file.reasons {
-                println!("         - {}", reason);
+                println!("         - {reason}");
             }
         }
         if low_canon.len() > 5 {
@@ -11275,7 +11282,7 @@ fn cmd_suggest_consolidation(
         );
         println!("  Merge into canonical:");
         for m in &group.merge_into {
-            println!("    - {}", m);
+            println!("    - {m}");
         }
         println!("  Note: {}", group.note);
         println!();
@@ -11292,11 +11299,11 @@ mod tests {
     fn test_jaccard_similarity() {
         let set1: HashSet<String> = ["foo", "bar", "baz"]
             .iter()
-            .map(|s| s.to_string())
+            .map(|s| (*s).to_string())
             .collect();
         let set2: HashSet<String> = ["bar", "baz", "qux"]
             .iter()
-            .map(|s| s.to_string())
+            .map(|s| (*s).to_string())
             .collect();
 
         let sim = jaccard_similarity(&set1, &set2);
@@ -11642,7 +11649,7 @@ mod tests {
         );
 
         // Too long: 25 lines
-        let long_content: String = (0..25).map(|i| format!("line{}\n", i)).collect();
+        let long_content: String = (0..25).map(|i| format!("line{i}\n")).collect();
         let long_violations =
             collect_policy_violations_for_content(&rule, "docs/long.md", &long_content);
         assert!(
@@ -11664,7 +11671,7 @@ mod tests {
             ..Default::default()
         };
 
-        let content = r#"
+        let content = r"
 # Title
 
 ## Objective
@@ -11672,7 +11679,7 @@ mod tests {
 Some content here.
 
 ## Deprecated
-"#;
+";
 
         let violations = collect_policy_violations_for_content(&rule, "docs/example.md", content);
 
@@ -11704,7 +11711,7 @@ Some content here.
             ..Default::default()
         };
 
-        let content = r#"
+        let content = r"
 # Status
 
 ## Async Migration
@@ -11715,7 +11722,7 @@ line4
 
 ## Other
 ok
-"#;
+";
 
         let violations =
             collect_policy_violations_for_content(&rule, "docs/IMPLEMENTATION_STATUS.md", content);
@@ -11738,10 +11745,10 @@ ok
             ..Default::default()
         };
 
-        let missing_link = r#"
+        let missing_link = r"
 # Status
 No links here.
-"#;
+";
         let violations = collect_policy_violations_for_content(
             &rule,
             "docs/IMPLEMENTATION_STATUS.md",
@@ -11754,10 +11761,10 @@ No links here.
             "Expected a missing required link violation"
         );
 
-        let with_link = r#"
+        let with_link = r"
 # Status
 See [summary](ASYNC_MIGRATION_COMPLETE_SUMMARY.md).
-"#;
+";
         let ok_violations = collect_policy_violations_for_content(
             &rule,
             "docs/IMPLEMENTATION_STATUS.md",
@@ -11993,7 +12000,7 @@ See [summary](ASYNC_MIGRATION_COMPLETE_SUMMARY.md).
 
     #[test]
     fn test_compute_document_metrics_captures_structure_signals() {
-        let content = r#"---
+        let content = r"---
 title: Demo
 owner: Docs
 ---
@@ -12013,7 +12020,7 @@ Intro paragraph.
 ```rust
 fn main() {}
 ```
-"#;
+";
         let lines: Vec<&str> = content.lines().collect();
         let headings = vec![
             Heading {

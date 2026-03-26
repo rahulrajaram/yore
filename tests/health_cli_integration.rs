@@ -8,7 +8,7 @@ fn temp_dir(label: &str) -> PathBuf {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
         .as_nanos();
-    let dir = std::env::temp_dir().join(format!("yore-health-test-{}-{}", label, nanos));
+    let dir = std::env::temp_dir().join(format!("yore-health-test-{label}-{nanos}"));
     fs::create_dir_all(&dir).unwrap();
     dir
 }
@@ -23,7 +23,7 @@ fn write_docs(root: &Path) {
     let docs = root.join("docs");
     fs::create_dir_all(&docs).unwrap();
 
-    let noisy = r#"# Build Plan
+    let noisy = r"# Build Plan
 
 ## Part 1
 Step one
@@ -42,7 +42,7 @@ Step three
 line one
 line two
 line three
-"#;
+";
     fs::write(docs.join("noisy.md"), noisy).unwrap();
     fs::write(
         docs.join("healthy.md"),
@@ -57,7 +57,7 @@ fn build_index(root: &Path, index_dir: &Path) {
         .args(["build", "docs", "--output"])
         .arg(index_dir);
     let (ok, stdout) = run_cmd(cmd);
-    assert!(ok, "build failed: {}", stdout);
+    assert!(ok, "build failed: {stdout}");
 }
 
 #[test]
@@ -85,7 +85,7 @@ fn test_health_all_json_reports_detected_issues() {
         ])
         .arg(&index_dir);
     let (ok, stdout) = run_cmd(cmd);
-    assert!(ok, "health failed: {}", stdout);
+    assert!(ok, "health failed: {stdout}");
 
     let value: Value = serde_json::from_str(stdout.trim()).unwrap();
     assert_eq!(value["total_files"], 2);
@@ -123,7 +123,7 @@ fn test_health_single_file_human_output_reports_healthy() {
         .args(["health", "docs/healthy.md", "--index"])
         .arg(&index_dir);
     let (ok, stdout) = run_cmd(cmd);
-    assert!(ok, "health failed: {}", stdout);
+    assert!(ok, "health failed: {stdout}");
     assert!(stdout.contains("docs/healthy.md"));
     assert!(stdout.contains("HEALTHY"));
 }
