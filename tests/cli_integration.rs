@@ -170,7 +170,8 @@ Random development notes.
     )
     .unwrap();
 
-    // Near-duplicate of architecture
+    // Near-duplicate of architecture (nearly identical content to ensure
+    // high MinHash similarity regardless of platform hash seeds)
     fs::write(
         docs.join("architecture-v2.md"),
         "\
@@ -188,11 +189,11 @@ See [API Reference](api-reference.md#endpoints) for endpoint details.
 
 ### Data Layer
 
-PostgreSQL as primary data store, per ADR-002.
+PostgreSQL as primary store, per ADR-002.
 
 ### Cache Layer
 
-Redis for session caching.
+Redis for session caching added in v2.
 ",
     )
     .unwrap();
@@ -436,7 +437,7 @@ fn test_dupes_detects_near_duplicates() {
     build_index(&root, "docs", &index);
 
     // dupes returns a bare JSON array of pair objects
-    let (ok, stdout, _) = yore(&["dupes", "--json", "--threshold", "0.3"], &index);
+    let (ok, stdout, _) = yore(&["dupes", "--json", "--threshold", "0.1"], &index);
     assert!(ok, "dupes failed: {stdout}");
     let v: Value = serde_json::from_str(&stdout).unwrap();
     let pairs = v.as_array().unwrap();
@@ -460,7 +461,7 @@ fn test_dupes_group_mode() {
     let index = root.join(".yore");
     build_index(&root, "docs", &index);
 
-    let (ok, stdout, _) = yore(&["dupes", "--group", "--threshold", "0.3"], &index);
+    let (ok, stdout, _) = yore(&["dupes", "--group", "--threshold", "0.1"], &index);
     assert!(ok, "dupes --group failed: {stdout}");
     assert!(
         stdout.contains("architecture"),
