@@ -1,3 +1,6 @@
+// Suppress errors about lints that exist in one clippy version but are
+// renamed/removed in another (e.g. match_on_vec_items removed in 1.94+).
+#![allow(renamed_and_removed_lints)]
 // Pedantic lint config: enable pedantic, then allow categories that are
 // not worth fixing across a 13K-line single-file CLI.
 #![warn(clippy::pedantic)]
@@ -32,9 +35,6 @@
     clippy::implicit_clone,
     clippy::ref_option
 )]
-// Suppress errors about lints that exist in one clippy version but are
-// renamed/removed in another (e.g. match_on_vec_items in 1.94+).
-#![allow(renamed_and_removed_lints)]
 
 use ahash::AHasher;
 use clap::{Parser, Subcommand};
