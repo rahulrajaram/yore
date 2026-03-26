@@ -17,7 +17,7 @@ details. Also adds reporting for canonical documents that lack inbound links.
 
 ## 1. `yore health` — Structural Document Health Detection
 
-**Status:** Proposed
+**Status:** Implemented
 **Priority:** High
 **Source:** [striation_customer_platform agents/reports/platform-documentation-steward/2026-01-01_yore-structural-analysis-proposal.md](https://github.com/anthropics/striation_customer_platform)
 
