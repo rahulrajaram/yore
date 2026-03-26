@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.7.0
+- Add deterministic relation extraction at build time (`relations.json`).
+- Emit three edge types: `links_to`, `section_links_to`, `adr_reference`.
+- Persist stable, sorted, deduplicated edges for graph-aware retrieval.
+- Display relation count in build summary output.
+- Extract ADR references (`ADR-001`, `ADR 13`, etc.) during indexing.
+- Add backward-compatible `load_relation_index()` for downstream commands.
+- Add `yore paths` subcommand for BFS relation traversal with
+  `--depth`, `--kind` filter, and `--json` output.
+- Add `--use-relations` flag to `assemble` for graph-aware
+  cross-reference expansion from persisted relation edges.
+
 ## 0.4.0
 - Add missing command coverage in the help and README command reference (`similar`, `diff`, `stats`, `repl`, `policy`) for full CLI parity.
 - Add missing option documentation for `eval`, `fix-links`, `mv`, and `fix-references` to keep CLI guidance congruent with behavior.

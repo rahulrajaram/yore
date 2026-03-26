@@ -263,3 +263,152 @@ fn test_self_links_excluded() {
         );
     }
 }
+
+// ── Helper: create cross-linked fixture ─────────────────────────────
+
+fn write_crosslinked_docs(root: &Path) {
+    let docs = root.join("docs");
+    let adr = docs.join("adr");
+    fs::create_dir_all(&adr).unwrap();
+
+    fs::write(
+        docs.join("architecture.md"),
+        "# Architecture\n\n## Auth\n\nPer ADR-001. See [API](api.md#endpoints).\n",
+    )
+    .unwrap();
+    fs::write(
+        docs.join("api.md"),
+        "# API Reference\n\n## Endpoints\n\nSee [Architecture](architecture.md#auth).\n",
+    )
+    .unwrap();
+    fs::write(
+        adr.join("ADR-001.md"),
+        "# ADR-001: JWT Auth\n\n## Decision\n\nUse JWT.\n",
+    )
+    .unwrap();
+}
+
+// ── Test 7: yore paths human output ────────────────────────────────
+
+#[test]
+fn test_paths_shows_edges_from_source() {
+    let root = temp_dir("paths-human");
+    write_crosslinked_docs(&root);
+    let index = root.join(".yore");
+    yore_build(&root, "docs", &index);
+
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_yore"));
+    cmd.args(["paths", "architecture.md", "--index"])
+        .arg(&index);
+    let output = cmd.output().expect("paths failed");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+
+    assert!(output.status.success(), "paths failed: {}", stdout);
+    assert!(stdout.contains("links_to"), "expected links_to in output");
+    assert!(
+        stdout.contains("api.md"),
+        "expected api.md target in output"
+    );
+}
+
+// ── Test 8: yore paths JSON output ─────────────────────────────────
+
+#[test]
+fn test_paths_json_output() {
+    let root = temp_dir("paths-json");
+    write_crosslinked_docs(&root);
+    let index = root.join(".yore");
+    yore_build(&root, "docs", &index);
+
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_yore"));
+    cmd.args(["paths", "architecture.md", "--json", "--index"])
+        .arg(&index);
+    let output = cmd.output().expect("paths failed");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+
+    assert!(output.status.success());
+    let result: Value = serde_json::from_str(&stdout).unwrap();
+    assert!(result["total_edges"].as_u64().unwrap() > 0);
+    assert!(result["edges"].is_array());
+}
+
+// ── Test 9: yore paths --kind filter ───────────────────────────────
+
+#[test]
+fn test_paths_kind_filter() {
+    let root = temp_dir("paths-kind");
+    write_crosslinked_docs(&root);
+    let index = root.join(".yore");
+    yore_build(&root, "docs", &index);
+
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_yore"));
+    cmd.args([
+        "paths",
+        "architecture.md",
+        "--kind",
+        "adr_reference",
+        "--json",
+        "--index",
+    ])
+    .arg(&index);
+    let output = cmd.output().expect("paths failed");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+
+    assert!(output.status.success());
+    let result: Value = serde_json::from_str(&stdout).unwrap();
+    let edges = result["edges"].as_array().unwrap();
+    for edge in edges {
+        assert_eq!(edge["kind"], "adr_reference");
+    }
+}
+
+// ── Test 10: assemble --use-relations produces output ──────────────
+
+#[test]
+fn test_assemble_use_relations() {
+    let root = temp_dir("assemble-rel");
+    write_crosslinked_docs(&root);
+    let index = root.join(".yore");
+    yore_build(&root, "docs", &index);
+
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_yore"));
+    cmd.args(["assemble", "JWT auth", "--use-relations", "--index"])
+        .arg(&index);
+    let output = cmd.output().expect("assemble failed");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+
+    assert!(
+        output.status.success(),
+        "assemble --use-relations failed: {}",
+        stdout
+    );
+    assert!(
+        stdout.contains("Context Digest"),
+        "expected markdown output"
+    );
+}
+
+// ── Test 11: assemble --use-relations works without relations.json ──
+
+#[test]
+fn test_assemble_use_relations_backward_compat() {
+    let root = temp_dir("assemble-norel");
+    write_crosslinked_docs(&root);
+    let index = root.join(".yore");
+    yore_build(&root, "docs", &index);
+
+    // Remove relations.json to test backward compat
+    fs::remove_file(index.join("relations.json")).unwrap();
+
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_yore"));
+    cmd.args(["assemble", "JWT auth", "--use-relations", "--index"])
+        .arg(&index);
+    let output = cmd.output().expect("assemble failed");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+
+    assert!(
+        output.status.success(),
+        "assemble --use-relations should not fail when relations.json is missing: {}",
+        stdout
+    );
+}

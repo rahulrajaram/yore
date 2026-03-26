@@ -557,6 +557,10 @@ enum Commands {
         #[arg(long, value_name = "PATH", num_args = 1..)]
         from_files: Vec<String>,
 
+        /// Use persisted relation graph for cross-reference expansion
+        #[arg(long)]
+        use_relations: bool,
+
         /// Index directory
         #[arg(short, long, default_value = ".yore")]
         index: PathBuf,
@@ -1017,6 +1021,37 @@ enum Commands {
         /// Output format: "json" or "dot"
         #[arg(long, default_value = "json")]
         format: String,
+
+        /// Index directory
+        #[arg(short, long, default_value = ".yore")]
+        index: PathBuf,
+    },
+
+    /// Show relation paths between documents via the persisted relation graph.
+    ///
+    /// Displays how a source document connects to other documents through
+    /// links, section links, and ADR references. Requires `relations.json`
+    /// from `yore build`.
+    ///
+    /// Examples:
+    ///   yore paths docs/architecture.md --index .yore
+    ///   yore paths docs/architecture.md --json --index .yore
+    ///   yore paths docs/architecture.md --depth 2 --index .yore
+    Paths {
+        /// Source file to show paths from
+        source: String,
+
+        /// Traversal depth (1 = direct edges, 2 = two hops)
+        #[arg(short = 'd', long, default_value = "1")]
+        depth: usize,
+
+        /// Filter by edge kind: links_to, section_links_to, adr_reference
+        #[arg(long)]
+        kind: Option<String>,
+
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
 
         /// Index directory
         #[arg(short, long, default_value = ".yore")]
@@ -2381,6 +2416,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             format,
             doc_terms,
             from_files,
+            use_relations,
             index,
         } => cmd_assemble(
             &query.join(" "),
@@ -2391,6 +2427,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 depth,
                 format,
                 doc_terms,
+                use_relations,
             },
             &index,
         ),
@@ -2492,6 +2529,13 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             threshold,
         } => cmd_canonical_orphans(&index, threshold, json),
         Commands::ExportGraph { format, index } => cmd_export_graph(&index, &format),
+        Commands::Paths {
+            source,
+            depth,
+            kind,
+            json,
+            index,
+        } => cmd_paths(&source, depth, kind.as_deref(), json, &index),
         Commands::SuggestConsolidation {
             threshold,
             json,
@@ -3623,6 +3667,7 @@ struct AssembleOptions {
     depth: usize,
     format: String,
     doc_terms: usize,
+    use_relations: bool,
 }
 
 struct HealthOptions {
@@ -6955,6 +7000,93 @@ fn resolve_crossrefs(
     xref_sections
 }
 
+/// Resolve cross-references using the persisted relation graph (graph-aware mode).
+/// Finds all documents reachable from primary docs via relation edges and
+/// includes their sections within the token budget.
+fn resolve_crossrefs_from_relations(
+    relation_index: &RelationIndex,
+    primary_docs: &HashSet<String>,
+    index: &ForwardIndex,
+    xref_token_budget: usize,
+) -> Vec<SectionMatch> {
+    const MAX_TOKENS_PER_XREF_DOC: usize = 600;
+
+    // Collect target docs reachable from primary docs, with edge info
+    let mut target_edges: HashMap<String, Vec<&RelationEdge>> = HashMap::new();
+    for edge in &relation_index.edges {
+        if primary_docs.contains(&edge.source) && !primary_docs.contains(&edge.target) {
+            target_edges
+                .entry(edge.target.clone())
+                .or_default()
+                .push(edge);
+        }
+    }
+
+    // Sort targets: more edges = higher priority, then by doc type, then alphabetical
+    let mut targets: Vec<(String, Vec<&RelationEdge>)> = target_edges.into_iter().collect();
+    targets.sort_by(|a, b| b.1.len().cmp(&a.1.len()).then_with(|| a.0.cmp(&b.0)));
+
+    let mut xref_sections = Vec::new();
+    let mut remaining_budget = xref_token_budget;
+    let mut visited: HashSet<String> = primary_docs.clone();
+
+    for (target_path, edges) in targets {
+        if remaining_budget == 0 {
+            break;
+        }
+        if visited.contains(&target_path) {
+            continue;
+        }
+
+        let entry = match index.files.get(&target_path) {
+            Some(e) => e,
+            None => continue,
+        };
+
+        // Pick anchor from first edge that has one
+        let anchor = edges.iter().find_map(|e| e.anchor.as_deref());
+
+        // Select sections: if anchor, try targeted; otherwise first few sections
+        let doc_type = classify_target_doc(&target_path);
+        let max_sections = match doc_type {
+            DocType::Adr => 3,
+            DocType::Design => 2,
+            DocType::Ops => 2,
+            DocType::Other => 2,
+        };
+
+        let mut doc_sections = match doc_type {
+            DocType::Adr => select_sections_for_adr(&target_path, index, entry, max_sections),
+            DocType::Design => {
+                select_sections_for_design(&target_path, index, entry, anchor, max_sections)
+            }
+            DocType::Ops => select_sections_for_ops(&target_path, index, entry, max_sections),
+            DocType::Other => select_sections_for_other(&target_path, index, entry),
+        };
+
+        // Apply token budget
+        let mut doc_tokens = 0;
+        let mut filtered = Vec::new();
+        for section in doc_sections.drain(..) {
+            let section_tokens = estimate_tokens(&section.content);
+            if doc_tokens + section_tokens > MAX_TOKENS_PER_XREF_DOC {
+                break;
+            }
+            if remaining_budget < section_tokens {
+                break;
+            }
+            doc_tokens += section_tokens;
+            remaining_budget -= section_tokens;
+            filtered.push(section);
+        }
+
+        visited.insert(target_path);
+        xref_sections.extend(filtered);
+    }
+
+    xref_sections
+}
+
 // ============================================================================
 // Extractive Refiner (Phase 2.3)
 // ============================================================================
@@ -8133,12 +8265,6 @@ fn cmd_assemble(
     let mut all_sections = primary_sections.clone();
 
     if options.depth > 0 {
-        // Build ADR index
-        let adr_index = build_adr_index(&forward_index);
-
-        // Collect cross-references
-        let crossrefs = collect_crossrefs(&primary_sections, &adr_index);
-
         // Calculate xref token budget
         const XREF_TOKEN_FRACTION: f64 = 0.3;
         const XREF_TOKEN_ABS_MAX: usize = 2000;
@@ -8148,19 +8274,33 @@ fn cmd_assemble(
         let remaining_tokens = options.max_tokens.saturating_sub(primary_tokens);
         let xref_token_budget = remaining_tokens.min(xref_cap);
 
-        if xref_token_budget > 0 && !crossrefs.is_empty() {
-            // Get primary doc paths for deduplication
-            let primary_docs: HashSet<String> = primary_sections
-                .iter()
-                .map(|s| s.doc_path.clone())
-                .collect();
+        let primary_docs: HashSet<String> = primary_sections
+            .iter()
+            .map(|s| s.doc_path.clone())
+            .collect();
 
-            // Resolve cross-references
-            let xref_sections =
-                resolve_crossrefs(&crossrefs, &primary_docs, &forward_index, xref_token_budget);
+        if options.use_relations {
+            // Graph-aware expansion via persisted relation edges
+            let relation_index = load_relation_index(index_dir);
+            if !relation_index.edges.is_empty() && xref_token_budget > 0 {
+                let xref_sections = resolve_crossrefs_from_relations(
+                    &relation_index,
+                    &primary_docs,
+                    &forward_index,
+                    xref_token_budget,
+                );
+                all_sections.extend(xref_sections);
+            }
+        } else {
+            // Legacy on-the-fly cross-reference expansion
+            let adr_index = build_adr_index(&forward_index);
+            let crossrefs = collect_crossrefs(&primary_sections, &adr_index);
 
-            // Merge cross-ref sections
-            all_sections.extend(xref_sections);
+            if xref_token_budget > 0 && !crossrefs.is_empty() {
+                let xref_sections =
+                    resolve_crossrefs(&crossrefs, &primary_docs, &forward_index, xref_token_budget);
+                all_sections.extend(xref_sections);
+            }
         }
     }
     let (all_sections, _) = dedupe_section_matches(all_sections);
@@ -9930,6 +10070,156 @@ fn compute_inbound_link_counts(forward_index: &ForwardIndex) -> HashMap<String, 
     }
 
     counts
+}
+
+/// Show relation paths from a source document via the persisted relation graph.
+fn cmd_paths(
+    source: &str,
+    depth: usize,
+    kind_filter: Option<&str>,
+    json: bool,
+    index_dir: &Path,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let relation_index = load_relation_index(index_dir);
+    if relation_index.edges.is_empty() {
+        if json {
+            println!("{{\"source\":\"{}\",\"paths\":[]}}", source);
+        } else {
+            println!(
+                "{} No relations found. Run 'yore build' first.",
+                "Info:".yellow()
+            );
+        }
+        return Ok(());
+    }
+
+    let depth = depth.clamp(1, 3);
+
+    // Normalize source: try exact match, then suffix match
+    let all_sources: HashSet<&str> = relation_index
+        .edges
+        .iter()
+        .flat_map(|e| [e.source.as_str(), e.target.as_str()])
+        .collect();
+
+    let resolved_source = if all_sources.contains(source) {
+        source.to_string()
+    } else {
+        // Try suffix match
+        match all_sources
+            .iter()
+            .find(|s| s.ends_with(source) || source.ends_with(*s))
+        {
+            Some(s) => s.to_string(),
+            None => {
+                if json {
+                    println!("{{\"source\":\"{}\",\"paths\":[]}}", source);
+                } else {
+                    println!(
+                        "{} '{}' not found in relation graph.",
+                        "Info:".yellow(),
+                        source
+                    );
+                }
+                return Ok(());
+            }
+        }
+    };
+
+    // BFS traversal up to depth
+    let mut visited: HashSet<String> = HashSet::new();
+    visited.insert(resolved_source.clone());
+    let mut frontier: Vec<String> = vec![resolved_source.clone()];
+    let mut result_edges: Vec<&RelationEdge> = Vec::new();
+
+    for _ in 0..depth {
+        let mut next_frontier: Vec<String> = Vec::new();
+        for node in &frontier {
+            for edge in &relation_index.edges {
+                if &edge.source != node {
+                    continue;
+                }
+                // Apply kind filter
+                if let Some(kf) = kind_filter {
+                    let edge_kind = match &edge.kind {
+                        RelationKind::LinksTo => "links_to",
+                        RelationKind::SectionLinksTo => "section_links_to",
+                        RelationKind::AdrReference => "adr_reference",
+                    };
+                    if edge_kind != kf {
+                        continue;
+                    }
+                }
+                result_edges.push(edge);
+                if !visited.contains(&edge.target) {
+                    visited.insert(edge.target.clone());
+                    next_frontier.push(edge.target.clone());
+                }
+            }
+        }
+        frontier = next_frontier;
+    }
+
+    if json {
+        #[derive(Serialize)]
+        struct PathsResult<'a> {
+            source: &'a str,
+            depth: usize,
+            total_edges: usize,
+            edges: &'a [&'a RelationEdge],
+        }
+        let result = PathsResult {
+            source: &resolved_source,
+            depth,
+            total_edges: result_edges.len(),
+            edges: &result_edges,
+        };
+        println!("{}", serde_json::to_string_pretty(&result)?);
+    } else {
+        println!(
+            "{} {} (depth {})",
+            "Paths from".green().bold(),
+            resolved_source.cyan(),
+            depth
+        );
+        println!();
+
+        if result_edges.is_empty() {
+            println!("  No outgoing edges found.");
+        } else {
+            for edge in &result_edges {
+                let kind_label = match &edge.kind {
+                    RelationKind::LinksTo => "links_to",
+                    RelationKind::SectionLinksTo => "section_links_to",
+                    RelationKind::AdrReference => "adr_reference",
+                };
+                let mut detail = String::new();
+                if let Some(anchor) = &edge.anchor {
+                    detail.push_str(&format!(" #{}", anchor));
+                }
+                if let Some(src_sec) = &edge.source_section {
+                    detail.push_str(&format!(" [from: {}]", src_sec.heading));
+                }
+                if let Some(tgt_sec) = &edge.target_section {
+                    detail.push_str(&format!(" [to: {}]", tgt_sec.heading));
+                }
+                if let Some(raw) = &edge.raw_text {
+                    detail.push_str(&format!(" ({})", raw));
+                }
+                println!(
+                    "  {} {} -> {}{}",
+                    kind_label.yellow(),
+                    edge.source,
+                    edge.target.cyan(),
+                    detail
+                );
+            }
+            println!();
+            println!("  {} edges total", result_edges.len());
+        }
+    }
+
+    Ok(())
 }
 
 fn cmd_export_graph(index_dir: &Path, format: &str) -> Result<(), Box<dyn std::error::Error>> {
