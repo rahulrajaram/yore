@@ -1525,6 +1525,8 @@ struct BuildResult {
     duration_ms: u128,
     #[serde(skip_serializing_if = "Option::is_none")]
     renames_tracked: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    total_relations: Option<usize>,
 }
 
 // Eval JSON output structure
@@ -1676,6 +1678,52 @@ struct GraphExport {
     edges: Vec<GraphEdge>,
 }
 
+// Relation extraction structs (YEH-004)
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+struct SectionRef {
+    heading: String,
+    line_start: usize,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+#[serde(rename_all = "snake_case")]
+enum RelationKind {
+    LinksTo,
+    SectionLinksTo,
+    AdrReference,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+struct RelationEdge {
+    source: String,
+    target: String,
+    kind: RelationKind,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    anchor: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    source_section: Option<SectionRef>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    target_section: Option<SectionRef>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    raw_text: Option<String>,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+struct RelationIndex {
+    version: u32,
+    indexed_at: String,
+    total_edges: usize,
+    edges: Vec<RelationEdge>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+struct AdrRef {
+    line: usize,
+    raw_text: String,
+    normalized_id: String,
+}
+
 #[derive(Serialize, Debug)]
 struct ConsolidationGroup {
     canonical: String,
@@ -1806,6 +1854,8 @@ struct FileEntry {
     minhash: Vec<u64>, // MinHash signature for LSH
     #[serde(default)]
     section_fingerprints: Vec<SectionFingerprint>, // NEW: section-level SimHash
+    #[serde(default)]
+    adr_references: Vec<AdrRef>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -2713,6 +2763,15 @@ fn cmd_build(
     };
     fs::write(&stats_path, serde_json::to_string_pretty(&stats)?)?;
 
+    // Extract and persist relation edges
+    let relation_index = extract_relations(&forward_index);
+    let relations_count = relation_index.total_edges;
+    let relations_path = output.join("relations.json");
+    fs::write(
+        &relations_path,
+        serde_json::to_string_pretty(&relation_index)?,
+    )?;
+
     // Track git renames if requested
     let renames_count = if track_renames {
         if !quiet && !json {
@@ -2741,6 +2800,7 @@ fn cmd_build(
             unique_keywords: reverse_index.keywords.len(),
             duration_ms: elapsed.as_millis(),
             renames_tracked: renames_count,
+            total_relations: Some(relations_count),
         };
         println!("{}", serde_json::to_string_pretty(&result)?);
     } else if !quiet {
@@ -2753,6 +2813,7 @@ fn cmd_build(
         );
         println!("  Total headings:   {}", total_headings.to_string().cyan());
         println!("  Total links:      {}", total_links.to_string().cyan());
+        println!("  Relations:        {}", relations_count.to_string().cyan());
         println!("  Time elapsed:     {:.2?}", elapsed);
         println!();
         println!(
@@ -2866,6 +2927,22 @@ fn index_file(path: &Path) -> Result<(FileEntry, DocumentMetrics), Box<dyn std::
     // Compute simhash fingerprint
     let simhash = compute_simhash(&content);
 
+    // Extract ADR references from content
+    let adr_regex = Regex::new(r"\bADR[-_ ]?(\d{2,4})\b").unwrap();
+    let mut adr_references = Vec::new();
+    for (i, line) in lines.iter().enumerate() {
+        for caps in adr_regex.captures_iter(line) {
+            if let Some(num_match) = caps.get(1) {
+                let num_val: usize = num_match.as_str().parse().unwrap_or(0);
+                adr_references.push(AdrRef {
+                    line: i + 1,
+                    raw_text: caps.get(0).unwrap().as_str().to_string(),
+                    normalized_id: format!("{:03}", num_val),
+                });
+            }
+        }
+    }
+
     Ok((
         FileEntry {
             path: path.to_string_lossy().to_string(),
@@ -2880,6 +2957,7 @@ fn index_file(path: &Path) -> Result<(FileEntry, DocumentMetrics), Box<dyn std::
             doc_length: total_terms,
             minhash,
             section_fingerprints,
+            adr_references,
         },
         metrics,
     ))
@@ -5154,6 +5232,26 @@ fn load_forward_index(index_dir: &Path) -> Result<ForwardIndex, Box<dyn std::err
     Ok(serde_json::from_str(&content)?)
 }
 
+/// Load the relation index; returns an empty index if the file does not exist (backward compat).
+#[allow(dead_code)] // Used by upcoming YEH-005/006
+fn load_relation_index(index_dir: &Path) -> RelationIndex {
+    let path = index_dir.join("relations.json");
+    match fs::read_to_string(&path) {
+        Ok(content) => serde_json::from_str(&content).unwrap_or(RelationIndex {
+            version: 1,
+            indexed_at: String::new(),
+            total_edges: 0,
+            edges: vec![],
+        }),
+        Err(_) => RelationIndex {
+            version: 1,
+            indexed_at: String::new(),
+            total_edges: 0,
+            edges: vec![],
+        },
+    }
+}
+
 fn load_document_metrics(
     index_dir: &Path,
 ) -> Result<DocumentMetricsIndex, Box<dyn std::error::Error>> {
@@ -6129,6 +6227,139 @@ fn build_adr_index(index: &ForwardIndex) -> HashMap<String, String> {
     adr_map
 }
 
+/// Extract all deterministic relation edges from a forward index.
+/// Produces document-level links, section-level links, and ADR reference edges.
+fn extract_relations(forward_index: &ForwardIndex) -> RelationIndex {
+    // Build normalized-path-to-key map (sorted iteration for determinism)
+    let mut norm_to_key: HashMap<String, String> = HashMap::new();
+    let mut sorted_keys: Vec<&String> = forward_index.files.keys().collect();
+    sorted_keys.sort();
+    for key in &sorted_keys {
+        let normalized = normalize_path(Path::new(key));
+        norm_to_key
+            .entry(normalized)
+            .or_insert_with(|| (*key).clone());
+    }
+
+    let adr_index = build_adr_index(forward_index);
+    let mut edges: Vec<RelationEdge> = Vec::new();
+
+    for source_key in &sorted_keys {
+        let entry = &forward_index.files[*source_key];
+        let source_base = Path::new(source_key.as_str());
+
+        // Document & section edges from links
+        for link in &entry.links {
+            let target = &link.target;
+
+            // Skip external links
+            if target.starts_with("http://")
+                || target.starts_with("https://")
+                || target.starts_with("mailto:")
+                || target.starts_with("ftp://")
+            {
+                continue;
+            }
+
+            // Split off anchor
+            let (link_path, anchor) = if let Some(idx) = target.find('#') {
+                (
+                    target[..idx].to_string(),
+                    Some(target[idx + 1..].to_string()),
+                )
+            } else {
+                (target.clone(), None)
+            };
+
+            if link_path.is_empty() {
+                continue;
+            }
+
+            let resolved = if let Some(parent) = source_base.parent() {
+                parent.join(&link_path).to_string_lossy().to_string()
+            } else {
+                link_path.clone()
+            };
+            let normalized = normalize_path(Path::new(&resolved));
+
+            let target_key = match norm_to_key.get(&normalized) {
+                Some(k) => k.clone(),
+                None => continue,
+            };
+
+            // Skip self-links
+            if &target_key == *source_key {
+                continue;
+            }
+
+            // Document-level LinksTo edge
+            edges.push(RelationEdge {
+                source: (*source_key).clone(),
+                target: target_key.clone(),
+                kind: RelationKind::LinksTo,
+                anchor: anchor.clone(),
+                source_section: None,
+                target_section: None,
+                raw_text: None,
+            });
+
+            // Section-level edge
+            let source_section = find_containing_section(&entry.section_fingerprints, link.line);
+            if source_section.is_some() {
+                let target_section = anchor.as_deref().and_then(|a| {
+                    forward_index
+                        .files
+                        .get(&target_key)
+                        .and_then(|te| resolve_anchor_to_section(te, a))
+                });
+
+                edges.push(RelationEdge {
+                    source: (*source_key).clone(),
+                    target: target_key.clone(),
+                    kind: RelationKind::SectionLinksTo,
+                    anchor: anchor.clone(),
+                    source_section,
+                    target_section,
+                    raw_text: None,
+                });
+            }
+        }
+
+        // ADR reference edges
+        for adr_ref in &entry.adr_references {
+            if let Some(target_path) = adr_index.get(&adr_ref.normalized_id) {
+                // Skip self-links
+                if target_path == *source_key {
+                    continue;
+                }
+
+                let source_section =
+                    find_containing_section(&entry.section_fingerprints, adr_ref.line);
+
+                edges.push(RelationEdge {
+                    source: (*source_key).clone(),
+                    target: target_path.clone(),
+                    kind: RelationKind::AdrReference,
+                    anchor: None,
+                    source_section,
+                    target_section: None,
+                    raw_text: Some(adr_ref.raw_text.clone()),
+                });
+            }
+        }
+    }
+
+    edges.sort();
+    edges.dedup();
+
+    RelationIndex {
+        version: 1,
+        indexed_at: chrono_now(),
+        total_edges: edges.len(),
+        edges,
+    }
+}
+
 /// Parse markdown links from a section's content
 fn parse_markdown_links(section: &SectionMatch, origin_dir: &Path) -> Vec<CrossRef> {
     let mut refs = Vec::new();
@@ -6199,6 +6430,34 @@ fn parse_markdown_links(section: &SectionMatch, origin_dir: &Path) -> Vec<CrossR
     }
 
     refs
+}
+
+/// Find the section containing a given line number
+fn find_containing_section(sections: &[SectionFingerprint], line: usize) -> Option<SectionRef> {
+    for section in sections {
+        if section.line_start <= line && line <= section.line_end {
+            return Some(SectionRef {
+                heading: section.heading.clone(),
+                line_start: section.line_start,
+            });
+        }
+    }
+    None
+}
+
+/// Resolve an anchor fragment to a section in the target file entry
+fn resolve_anchor_to_section(entry: &FileEntry, anchor: &str) -> Option<SectionRef> {
+    let anchor_slug = anchor.to_lowercase().replace([' ', '_'], "-");
+    for section in &entry.section_fingerprints {
+        let heading_slug = section.heading.to_lowercase().replace(' ', "-");
+        if heading_slug == anchor_slug || heading_slug.contains(&anchor_slug) {
+            return Some(SectionRef {
+                heading: section.heading.clone(),
+                line_start: section.line_start,
+            });
+        }
+    }
+    None
 }
 
 /// Normalize a path (resolve .. and .)
@@ -10882,6 +11141,7 @@ mod tests {
                 doc_length: 0,
                 minhash: compute_minhash(&keywords1, 128),
                 section_fingerprints: vec![],
+                adr_references: vec![],
             },
         );
 
@@ -10900,6 +11160,7 @@ mod tests {
                 doc_length: 0,
                 minhash: compute_minhash(&keywords2, 128),
                 section_fingerprints: vec![],
+                adr_references: vec![],
             },
         );
 
@@ -10918,6 +11179,7 @@ mod tests {
                 doc_length: 0,
                 minhash: compute_minhash(&keywords3, 128),
                 section_fingerprints: vec![],
+                adr_references: vec![],
             },
         );
 
@@ -10960,6 +11222,7 @@ mod tests {
             doc_length: 100,
             minhash: vec![],
             section_fingerprints: vec![],
+            adr_references: vec![],
         };
 
         let mut idf_map = HashMap::new();
@@ -10997,6 +11260,7 @@ mod tests {
             doc_length: 50,
             minhash: vec![],
             section_fingerprints: vec![],
+            adr_references: vec![],
         };
 
         // Document with low term frequency
@@ -11016,6 +11280,7 @@ mod tests {
             doc_length: 50,
             minhash: vec![],
             section_fingerprints: vec![],
+            adr_references: vec![],
         };
 
         let mut idf_map = HashMap::new();
@@ -11260,6 +11525,7 @@ See [summary](ASYNC_MIGRATION_COMPLETE_SUMMARY.md).
                 doc_length: 0,
                 minhash: vec![],
                 section_fingerprints: vec![],
+                adr_references: vec![],
             },
         );
         files.insert(
@@ -11277,6 +11543,7 @@ See [summary](ASYNC_MIGRATION_COMPLETE_SUMMARY.md).
                 doc_length: 0,
                 minhash: vec![],
                 section_fingerprints: vec![],
+                adr_references: vec![],
             },
         );
 
@@ -11321,6 +11588,7 @@ See [summary](ASYNC_MIGRATION_COMPLETE_SUMMARY.md).
                 doc_length: 0,
                 minhash: vec![],
                 section_fingerprints: vec![],
+                adr_references: vec![],
             },
         );
         files.insert(
@@ -11338,6 +11606,7 @@ See [summary](ASYNC_MIGRATION_COMPLETE_SUMMARY.md).
                 doc_length: 0,
                 minhash: vec![],
                 section_fingerprints: vec![],
+                adr_references: vec![],
             },
         );
 
@@ -11636,6 +11905,7 @@ fn main() {}
             doc_length: 100,
             minhash: vec![],
             section_fingerprints: vec![],
+            adr_references: vec![],
         };
 
         let mut idf_map = HashMap::new();
@@ -11679,6 +11949,7 @@ fn main() {}
             doc_length: 100,
             minhash: vec![],
             section_fingerprints: vec![],
+            adr_references: vec![],
         };
 
         let mut idf_map = HashMap::new();
@@ -11714,6 +11985,7 @@ fn main() {}
             doc_length: 100,
             minhash: vec![],
             section_fingerprints: vec![],
+            adr_references: vec![],
         };
 
         let mut idf_map = HashMap::new();
@@ -11740,6 +12012,7 @@ fn main() {}
             doc_length: 100,
             minhash: vec![],
             section_fingerprints: vec![],
+            adr_references: vec![],
         };
 
         let idf_map = HashMap::new();
@@ -12037,6 +12310,7 @@ prefix = "runtime"
             unique_keywords: 800,
             duration_ms: 1234,
             renames_tracked: None,
+            total_relations: None,
         };
 
         let json = serde_json::to_string_pretty(&result).unwrap();
@@ -12204,6 +12478,7 @@ prefix = "runtime"
             unique_keywords: 500,
             duration_ms: 1000,
             renames_tracked: Some(25),
+            total_relations: None,
         };
 
         let json = serde_json::to_string_pretty(&result).unwrap();
@@ -12245,6 +12520,7 @@ path = "../api-docs"
             doc_length: 0,
             minhash: Vec::new(),
             section_fingerprints: Vec::new(),
+            adr_references: Vec::new(),
         }
     }
 
@@ -12477,6 +12753,7 @@ path = "../api-docs"
                 doc_length: 0,
                 minhash: Vec::new(),
                 section_fingerprints: Vec::new(),
+                adr_references: Vec::new(),
             },
         ]);
         let resolved = resolve_vocabulary_surface("term", &postings, Some(&forward)).unwrap();
@@ -12513,6 +12790,7 @@ path = "../api-docs"
                 doc_length: 0,
                 minhash: Vec::new(),
                 section_fingerprints: Vec::new(),
+                adr_references: Vec::new(),
             },
             FileEntry {
                 path: "guide.md".to_string(),
@@ -12527,6 +12805,7 @@ path = "../api-docs"
                 doc_length: 0,
                 minhash: Vec::new(),
                 section_fingerprints: Vec::new(),
+                adr_references: Vec::new(),
             },
         ]);
         let resolved = resolve_vocabulary_surface("word", &postings, Some(&forward)).unwrap();
@@ -12637,6 +12916,7 @@ path = "../api-docs"
                     simhash: 0,
                 },
             ],
+            adr_references: vec![],
         };
         let index = make_forward_index(vec![entry]);
         let sections = collect_sections_for_files(&[file_path_str], &index, "", 1);
