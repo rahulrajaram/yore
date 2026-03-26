@@ -29,8 +29,12 @@
     clippy::single_match_else,
     clippy::unnecessary_wraps,
     clippy::match_on_vec_items,
+    clippy::implicit_clone,
     clippy::ref_option
 )]
+// Suppress errors about lints that exist in one clippy version but are
+// renamed/removed in another (e.g. match_on_vec_items in 1.94+).
+#![allow(renamed_and_removed_lints)]
 
 use ahash::AHasher;
 use clap::{Parser, Subcommand};
