@@ -8,7 +8,7 @@ fn temp_dir(label: &str) -> PathBuf {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
         .as_nanos();
-    let dir = std::env::temp_dir().join(format!("yore-test-{}-{}", label, nanos));
+    let dir = std::env::temp_dir().join(format!("yore-test-{label}-{nanos}"));
     fs::create_dir_all(&dir).unwrap();
     dir
 }
@@ -36,7 +36,7 @@ fn build_index(root: &Path, index_dir: &Path) {
         .args(["build", "docs", "--output"])
         .arg(index_dir);
     let (ok, stdout) = run_cmd(cmd);
-    assert!(ok, "build failed: {}", stdout);
+    assert!(ok, "build failed: {stdout}");
 }
 
 #[test]

@@ -10,7 +10,7 @@ fn temp_dir(label: &str) -> PathBuf {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
         .as_nanos();
-    let dir = std::env::temp_dir().join(format!("yore-mcp-test-{}-{}", label, nanos));
+    let dir = std::env::temp_dir().join(format!("yore-mcp-test-{label}-{nanos}"));
     fs::create_dir_all(&dir).unwrap();
     dir
 }
@@ -59,7 +59,7 @@ fn build_index(root: &Path, index_dir: &Path) {
         .args(["build", "docs", "--output"])
         .arg(index_dir);
     let (ok, stdout) = run_cmd(cmd);
-    assert!(ok, "build failed: {}", stdout);
+    assert!(ok, "build failed: {stdout}");
 }
 
 fn search_context(root: &Path, index_dir: &Path, args: &[&str]) -> Value {
@@ -69,7 +69,7 @@ fn search_context(root: &Path, index_dir: &Path, args: &[&str]) -> Value {
         .arg(index_dir)
         .args(args);
     let (ok, stdout) = run_cmd(cmd);
-    assert!(ok, "search-context failed: {}", stdout);
+    assert!(ok, "search-context failed: {stdout}");
     serde_json::from_str(stdout.trim()).unwrap()
 }
 
@@ -152,7 +152,7 @@ fn test_mcp_fetch_context_expands_handle_with_truncation_metadata() {
         ])
         .arg(&index_dir);
     let (ok, stdout) = run_cmd(fetch);
-    assert!(ok, "fetch-context failed: {}", stdout);
+    assert!(ok, "fetch-context failed: {stdout}");
 
     let value: Value = serde_json::from_str(stdout.trim()).unwrap();
     assert_eq!(value["schema_version"], 1);
@@ -182,7 +182,7 @@ fn test_mcp_search_context_works_from_different_cwd_after_relative_build() {
         .args(["mcp", "search-context", "authentication", "--index"])
         .arg(&index_dir);
     let (ok, stdout) = run_cmd(cmd);
-    assert!(ok, "cross-cwd search-context failed: {}", stdout);
+    assert!(ok, "cross-cwd search-context failed: {stdout}");
 
     let value: Value = serde_json::from_str(stdout.trim()).unwrap();
     assert!(value["error"].is_null());
@@ -221,11 +221,7 @@ fn test_mcp_search_context_falls_back_when_index_dir_is_read_only() {
         .args(["mcp", "fetch-context", &handle, "--index"])
         .arg(&index_dir);
     let (ok, stdout) = run_cmd(fetch);
-    assert!(
-        ok,
-        "fetch-context failed after read-only search: {}",
-        stdout
-    );
+    assert!(ok, "fetch-context failed after read-only search: {stdout}");
 
     let value: Value = serde_json::from_str(stdout.trim()).unwrap();
     assert!(value["error"].is_null());
