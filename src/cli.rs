@@ -603,6 +603,10 @@ pub enum Commands {
         /// Output as JSON
         #[arg(long)]
         json: bool,
+
+        /// Values of k for precision@k, recall@k, nDCG@k (comma-separated)
+        #[arg(long, value_delimiter = ',', default_values_t = vec![5, 10])]
+        k: Vec<usize>,
     },
 
     /// Derive a deterministic vocabulary list from a built index.

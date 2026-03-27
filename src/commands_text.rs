@@ -645,6 +645,7 @@ pub(crate) fn cmd_eval(
     questions_path: &Path,
     index_dir: &Path,
     json: bool,
+    k_values: &[usize],
 ) -> Result<(), Box<dyn std::error::Error>> {
     // Load questions from JSONL file
     let questions_content = fs::read_to_string(questions_path)?;
@@ -676,6 +677,9 @@ pub(crate) fn cmd_eval(
         // Run assemble internally (capture output as string)
         let primary_sections = search_relevant_sections(&question.q, &forward_index, 20);
 
+        // Compute ranked doc list from initial BM25 retrieval
+        let ranked_docs = unique_doc_ranking(&primary_sections);
+
         if primary_sections.is_empty() {
             results.push(EvalResult {
                 id: question.id,
@@ -684,6 +688,9 @@ pub(crate) fn cmd_eval(
                 total: question.expect.len(),
                 passed: false,
                 tokens: 0,
+                ranked_docs,
+                ranking: None,
+                digest: String::new(),
             });
             continue;
         }
@@ -742,6 +749,12 @@ pub(crate) fn cmd_eval(
         let passed = hits >= min_hits;
         let tokens = estimate_tokens(&digest);
 
+        // Compute ranking metrics if relevant_docs is provided
+        let ranking = question.relevant_docs.as_ref().map(|rel_docs| {
+            let relevant_set: HashSet<String> = rel_docs.iter().cloned().collect();
+            compute_ranking_metrics(&ranked_docs, &relevant_set, k_values)
+        });
+
         results.push(EvalResult {
             id: question.id,
             question: question.q.clone(),
@@ -749,6 +762,9 @@ pub(crate) fn cmd_eval(
             total: question.expect.len(),
             passed,
             tokens,
+            ranked_docs,
+            ranking,
+            digest,
         });
     }
 
@@ -756,6 +772,15 @@ pub(crate) fn cmd_eval(
     let passed_count = results.iter().filter(|r| r.passed).count();
     let total = results.len();
     let pass_rate_pct = passed_count as f64 / total as f64 * 100.0;
+
+    // Compute aggregate ranking metrics across questions that have relevance data
+    let per_question_rankings: Vec<RankingMetrics> =
+        results.iter().filter_map(|r| r.ranking.clone()).collect();
+    let aggregate = if per_question_rankings.is_empty() {
+        None
+    } else {
+        Some(aggregate_ranking_metrics(&per_question_rankings, k_values))
+    };
 
     if json {
         let json_results: Vec<EvalQuestionResult> = results
@@ -766,14 +791,15 @@ pub(crate) fn cmd_eval(
                     .find(|q| q.id == r.id)
                     .map(|q| q.expect.clone())
                     .unwrap_or_default();
+                let digest_lower = r.digest.to_lowercase();
                 let found: Vec<String> = expected
                     .iter()
-                    .filter(|e| r.question.to_lowercase().contains(&e.to_lowercase()))
+                    .filter(|e| digest_lower.contains(&e.to_lowercase()))
                     .cloned()
                     .collect();
                 let missing: Vec<String> = expected
                     .iter()
-                    .filter(|e| !r.question.to_lowercase().contains(&e.to_lowercase()))
+                    .filter(|e| !digest_lower.contains(&e.to_lowercase()))
                     .cloned()
                     .collect();
                 EvalQuestionResult {
@@ -782,6 +808,7 @@ pub(crate) fn cmd_eval(
                     expected,
                     found,
                     missing,
+                    ranking: r.ranking.clone(),
                 }
             })
             .collect();
@@ -793,6 +820,7 @@ pub(crate) fn cmd_eval(
             failed: total - passed_count,
             pass_rate: pass_rate_pct,
             results: json_results,
+            ranking_metrics: aggregate,
         };
         println!("{}", serde_json::to_string_pretty(&output)?);
         return Ok(());
@@ -813,6 +841,20 @@ pub(crate) fn cmd_eval(
         println!("[{}] {}", result.id, result.question.white().bold());
         println!("  - hits: {}/{} {}", result.hits, result.total, status);
         println!("  - size: {} tokens", result.tokens);
+
+        if let Some(ranking) = &result.ranking {
+            println!("  - MRR: {:.3}", ranking.mrr);
+            for m in &ranking.precision_at_k {
+                println!("  - P@{}: {:.3}", m.k, m.value);
+            }
+            for m in &ranking.recall_at_k {
+                println!("  - R@{}: {:.3}", m.k, m.value);
+            }
+            for m in &ranking.ndcg_at_k {
+                println!("  - nDCG@{}: {:.3}", m.k, m.value);
+            }
+        }
+
         println!();
     }
 
@@ -821,6 +863,26 @@ pub(crate) fn cmd_eval(
     println!("{}", "Summary".cyan().bold());
     println!("  Passed: {passed_count}/{total} ({pass_rate_pct:.0}%)");
     println!("  Failed: {}/{}", total - passed_count, total);
+
+    if let Some(agg) = &aggregate {
+        println!();
+        println!("{}", "Ranking Metrics (aggregate)".cyan().bold());
+        println!(
+            "  Questions with relevance data: {}",
+            agg.questions_with_relevance
+        );
+        println!("  Mean MRR: {:.3}", agg.mean_mrr);
+        for m in &agg.mean_precision_at_k {
+            println!("  Mean P@{}: {:.3}", m.k, m.value);
+        }
+        for m in &agg.mean_recall_at_k {
+            println!("  Mean R@{}: {:.3}", m.k, m.value);
+        }
+        for m in &agg.mean_ndcg_at_k {
+            println!("  Mean nDCG@{}: {:.3}", m.k, m.value);
+        }
+    }
+
     println!();
 
     if passed_count < total {

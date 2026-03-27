@@ -561,6 +561,197 @@ pub fn truncate_text_to_budget(
     (truncated, true, reasons)
 }
 
+// ============================================================================
+// Ranked Retrieval Metrics (YEH-009)
+// ============================================================================
+
+/// Deduplicate BM25 section matches to unique doc paths by first occurrence.
+pub fn unique_doc_ranking(sections: &[SectionMatch]) -> Vec<String> {
+    let mut seen = HashSet::new();
+    let mut result = Vec::new();
+    for section in sections {
+        if seen.insert(section.doc_path.clone()) {
+            result.push(section.doc_path.clone());
+        }
+    }
+    result
+}
+
+/// Precision@k: fraction of top-k results that are relevant.
+pub fn precision_at_k(ranked: &[String], relevant: &HashSet<String>, k: usize) -> f64 {
+    if k == 0 {
+        return 0.0;
+    }
+    let top_k = ranked.iter().take(k);
+    let hits = top_k.filter(|doc| relevant.contains(doc.as_str())).count();
+    hits as f64 / k as f64
+}
+
+/// Recall@k: fraction of relevant documents found in top-k results.
+pub fn recall_at_k(ranked: &[String], relevant: &HashSet<String>, k: usize) -> f64 {
+    if relevant.is_empty() || k == 0 {
+        return 0.0;
+    }
+    let top_k: HashSet<&String> = ranked.iter().take(k).collect();
+    let hits = relevant.iter().filter(|doc| top_k.contains(doc)).count();
+    hits as f64 / relevant.len() as f64
+}
+
+/// Reciprocal rank: 1/rank of the first relevant document in the ranked list.
+pub fn reciprocal_rank(ranked: &[String], relevant: &HashSet<String>) -> f64 {
+    for (i, doc) in ranked.iter().enumerate() {
+        if relevant.contains(doc.as_str()) {
+            return 1.0 / (i as f64 + 1.0);
+        }
+    }
+    0.0
+}
+
+/// DCG@k with binary relevance (private helper).
+fn dcg_at_k(ranked: &[String], relevant: &HashSet<String>, k: usize) -> f64 {
+    ranked
+        .iter()
+        .take(k)
+        .enumerate()
+        .filter(|(_, doc)| relevant.contains(doc.as_str()))
+        .map(|(i, _)| 1.0 / (i as f64 + 2.0).log2())
+        .sum()
+}
+
+/// nDCG@k: normalized discounted cumulative gain with binary relevance.
+pub fn ndcg_at_k(ranked: &[String], relevant: &HashSet<String>, k: usize) -> f64 {
+    if relevant.is_empty() || k == 0 {
+        return 0.0;
+    }
+    let dcg = dcg_at_k(ranked, relevant, k);
+    // Ideal DCG: all relevant docs at top positions
+    let ideal_count = relevant.len().min(k);
+    let ideal_dcg: f64 = (0..ideal_count)
+        .map(|i| 1.0 / (i as f64 + 2.0).log2())
+        .sum();
+    if ideal_dcg == 0.0 {
+        return 0.0;
+    }
+    dcg / ideal_dcg
+}
+
+/// Compute all ranking metrics for a single question.
+pub fn compute_ranking_metrics(
+    ranked: &[String],
+    relevant: &HashSet<String>,
+    k_values: &[usize],
+) -> RankingMetrics {
+    use crate::types::MetricAtK;
+
+    RankingMetrics {
+        precision_at_k: k_values
+            .iter()
+            .map(|&k| MetricAtK {
+                k,
+                value: precision_at_k(ranked, relevant, k),
+            })
+            .collect(),
+        recall_at_k: k_values
+            .iter()
+            .map(|&k| MetricAtK {
+                k,
+                value: recall_at_k(ranked, relevant, k),
+            })
+            .collect(),
+        mrr: reciprocal_rank(ranked, relevant),
+        ndcg_at_k: k_values
+            .iter()
+            .map(|&k| MetricAtK {
+                k,
+                value: ndcg_at_k(ranked, relevant, k),
+            })
+            .collect(),
+    }
+}
+
+/// Aggregate ranking metrics across multiple questions by averaging.
+pub fn aggregate_ranking_metrics(
+    per_question: &[RankingMetrics],
+    k_values: &[usize],
+) -> AggregateRankingMetrics {
+    use crate::types::MetricAtK;
+
+    let n = per_question.len();
+    if n == 0 {
+        return AggregateRankingMetrics {
+            questions_with_relevance: 0,
+            mean_precision_at_k: k_values
+                .iter()
+                .map(|&k| MetricAtK { k, value: 0.0 })
+                .collect(),
+            mean_recall_at_k: k_values
+                .iter()
+                .map(|&k| MetricAtK { k, value: 0.0 })
+                .collect(),
+            mean_mrr: 0.0,
+            mean_ndcg_at_k: k_values
+                .iter()
+                .map(|&k| MetricAtK { k, value: 0.0 })
+                .collect(),
+        };
+    }
+
+    let mean_mrr: f64 = per_question.iter().map(|m| m.mrr).sum::<f64>() / n as f64;
+
+    let mean_precision_at_k: Vec<MetricAtK> = k_values
+        .iter()
+        .enumerate()
+        .map(|(idx, &k)| {
+            let sum: f64 = per_question
+                .iter()
+                .map(|m| m.precision_at_k.get(idx).map_or(0.0, |v| v.value))
+                .sum();
+            MetricAtK {
+                k,
+                value: sum / n as f64,
+            }
+        })
+        .collect();
+
+    let mean_recall_at_k: Vec<MetricAtK> = k_values
+        .iter()
+        .enumerate()
+        .map(|(idx, &k)| {
+            let sum: f64 = per_question
+                .iter()
+                .map(|m| m.recall_at_k.get(idx).map_or(0.0, |v| v.value))
+                .sum();
+            MetricAtK {
+                k,
+                value: sum / n as f64,
+            }
+        })
+        .collect();
+
+    let mean_ndcg_at_k: Vec<MetricAtK> = k_values
+        .iter()
+        .enumerate()
+        .map(|(idx, &k)| {
+            let sum: f64 = per_question
+                .iter()
+                .map(|m| m.ndcg_at_k.get(idx).map_or(0.0, |v| v.value))
+                .sum();
+            MetricAtK {
+                k,
+                value: sum / n as f64,
+            }
+        })
+        .collect();
+
+    AggregateRankingMetrics {
+        questions_with_relevance: n,
+        mean_precision_at_k,
+        mean_recall_at_k,
+        mean_mrr,
+        mean_ndcg_at_k,
+    }
+}
+
 pub fn normalize_path(path: &Path) -> String {
     let mut components = Vec::new();
 

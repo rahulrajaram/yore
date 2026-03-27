@@ -9,6 +9,31 @@ pub struct Question {
     pub expect: Vec<String>,
     #[serde(default)]
     pub min_hits: Option<usize>,
+    #[serde(default)]
+    pub relevant_docs: Option<Vec<String>>,
+}
+
+#[derive(Serialize, Debug, Clone)]
+pub struct MetricAtK {
+    pub k: usize,
+    pub value: f64,
+}
+
+#[derive(Serialize, Debug, Clone)]
+pub struct RankingMetrics {
+    pub precision_at_k: Vec<MetricAtK>,
+    pub recall_at_k: Vec<MetricAtK>,
+    pub mrr: f64,
+    pub ndcg_at_k: Vec<MetricAtK>,
+}
+
+#[derive(Serialize, Debug)]
+pub struct AggregateRankingMetrics {
+    pub questions_with_relevance: usize,
+    pub mean_precision_at_k: Vec<MetricAtK>,
+    pub mean_recall_at_k: Vec<MetricAtK>,
+    pub mean_mrr: f64,
+    pub mean_ndcg_at_k: Vec<MetricAtK>,
 }
 
 #[derive(Debug, Clone)]
@@ -19,6 +44,9 @@ pub struct EvalResult {
     pub total: usize,
     pub passed: bool,
     pub tokens: usize,
+    pub ranked_docs: Vec<String>,
+    pub ranking: Option<RankingMetrics>,
+    pub digest: String,
 }
 
 // Link checking structures
@@ -391,6 +419,8 @@ pub struct EvalJsonResult {
     pub failed: usize,
     pub pass_rate: f64,
     pub results: Vec<EvalQuestionResult>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ranking_metrics: Option<AggregateRankingMetrics>,
 }
 
 #[derive(Serialize, Debug)]
@@ -400,6 +430,8 @@ pub struct EvalQuestionResult {
     pub expected: Vec<String>,
     pub found: Vec<String>,
     pub missing: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ranking: Option<RankingMetrics>,
 }
 
 // Policy / taxonomy structures
