@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.7.0
+## 0.8.0
 - Add deterministic relation extraction at build time (`relations.json`).
 - Emit three edge types: `links_to`, `section_links_to`, `adr_reference`.
 - Persist stable, sorted, deduplicated edges for graph-aware retrieval.
