@@ -507,13 +507,14 @@ For MCP clients, `yore mcp serve` returns the same search/fetch payloads inside 
 
 **Stable top-level fields**
 
-* `search-context`: `schema_version`, `tool`, `query`, `selection_mode`, `budget`, `pressure`, `results`, `error`, `message`, `missing_files`
-* `fetch-context`: `schema_version`, `tool`, `handle`, `budget`, `pressure`, `query`, `result`, `error`, `message`
+* `search-context`: `schema_version`, `tool`, `query`, `selection_mode`, `budget`, `pressure`, `trace`, `results`, `error`, `message`, `missing_files`
+* `fetch-context`: `schema_version`, `tool`, `handle`, `budget`, `pressure`, `trace`, `query`, `result`, `error`, `message`
 
 **Stable nested fields**
 
 * `budget.max_results`, `budget.max_tokens`, `budget.max_bytes`, `budget.returned_results`, `budget.candidate_hits`, `budget.deduped_hits`, `budget.omitted_hits`, `budget.estimated_tokens`, `budget.bytes`
 * `pressure.truncated`, `pressure.reasons`
+* `trace.trace_id`, `trace.index_fingerprint`, `trace.strategy`, `trace.expansion_path`
 * `results[].handle`, `results[].rank`, `results[].source.path`, `results[].source.heading`, `results[].source.line_start`, `results[].source.line_end`
 * `results[].scores.bm25`, `results[].scores.canonicality`, `results[].scores.combined`
 * `results[].preview`, `results[].preview_tokens`, `results[].preview_bytes`, `results[].truncated`, `results[].truncation_reasons`
@@ -529,6 +530,10 @@ For MCP clients, `yore mcp serve` returns the same search/fetch payloads inside 
 * `pressure.truncated` means the overall response hit a cap or included at least one truncated payload.
 * `pressure.reasons` reports response-level pressure using `result_cap`, `token_cap`, and `byte_cap`.
 * `results[].truncated` and `results[].truncation_reasons` report truncation for an individual preview.
+* `trace.trace_id` is a unique `trc_`-prefixed hex identifier for the request, useful for correlating search/fetch pairs in logs.
+* `trace.index_fingerprint` is a deterministic `idx_`-prefixed hex fingerprint derived from the index metadata (`indexed_at`, `version`, file count); it changes whenever the index is rebuilt.
+* `trace.strategy` is `"lexical"` for search and `"artifact_fetch"` for fetch.
+* `trace.expansion_path` lists pipeline stages applied to the response (e.g. `bm25_search`, `dedup`, `extractive_refine`, `budget_truncate`).
 * `results[].handle` is an opaque handle persisted under `<index-dir>/mcp_handles/` when possible, with a temp-dir fallback for read-only indexes; callers should treat it as opaque and use `fetch-context` rather than reading artifact files directly.
 * Handles are deterministic for a fixed query, source path, section span, and section content.
 
@@ -579,6 +584,12 @@ yore mcp search-context authentication \
   "pressure": {
     "truncated": false
   },
+  "trace": {
+    "trace_id": "trc_a1b2c3d4e5f60718",
+    "index_fingerprint": "idx_9f8e7d6c5b4a3021",
+    "strategy": "lexical",
+    "expansion_path": ["bm25_search", "dedup", "extractive_refine"]
+  },
   "results": [
     {
       "handle": "ctx_d76396f763601873",
@@ -627,6 +638,12 @@ yore mcp fetch-context ctx_d76396f763601873 \
       "token_cap",
       "byte_cap"
     ]
+  },
+  "trace": {
+    "trace_id": "trc_f0e1d2c3b4a59687",
+    "index_fingerprint": "idx_9f8e7d6c5b4a3021",
+    "strategy": "artifact_fetch",
+    "expansion_path": ["artifact_load", "budget_truncate"]
   },
   "query": "authentication",
   "result": {

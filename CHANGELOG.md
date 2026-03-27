@@ -18,6 +18,9 @@
   relevance judgments (backward compatible).
 - Fix `found`/`missing` in eval JSON output to match against the
   assembled digest instead of the query text.
+- Add `trace` object to MCP search and fetch responses with `trace_id`,
+  `index_fingerprint`, `strategy`, and `expansion_path` for request-level
+  traceability (YEH-007).
 
 ## 0.6.0
 - Add `query` field to each result object in `--json` output so callers
