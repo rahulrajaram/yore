@@ -231,6 +231,7 @@ Run the evaluation harness against a test set of questions:
 
 ```bash
 yore eval --questions questions.jsonl --index docs/.index
+yore eval --questions questions.jsonl --index docs/.index --json --k 3,5,10
 ```
 
 ### 6.6 Link and structure analysis
@@ -652,7 +653,7 @@ yore mcp fetch-context ctx_d76396f763601873 \
 Evaluates the retrieval pipeline against a set of test questions.
 
 ```bash
-yore eval --questions <jsonl-file> --index <index-dir>
+yore eval --questions <jsonl-file> --index <index-dir> [--k <k1,k2,...>]
 ```
 
 Each line in the JSONL file represents a test question:
@@ -661,18 +662,26 @@ Each line in the JSONL file represents a test question:
 {"id": 1, "q": "How does auth work?", "expect": ["session", "token"], "min_hits": 2}
 ```
 
-Yore assembles context for each question, checks for expected substrings, and reports per‑question hits and an overall pass rate.
+To measure ranked retrieval quality, add `relevant_docs` to a question:
+
+```json
+{"id": 2, "q": "deployment steps", "expect": ["docker"], "relevant_docs": ["docs/guides/deployment.md"]}
+```
+
+Yore assembles context for each question, checks for expected substrings, and reports per‑question hits and an overall pass rate. When `relevant_docs` is present, yore also computes precision@k, recall@k, MRR, and nDCG@k over the initial BM25 retrieval ranking. Questions without `relevant_docs` produce the existing output only (backward compatible).
 
 **Key options**
 
 * `--questions` – Path to questions JSONL file (default: `questions.jsonl`)
 * `--index` – Index directory (default: `.yore`)
 * `--json` – Emit JSON output
+* `--k` – Comma‑separated k values for precision@k, recall@k, nDCG@k (default: `5,10`)
 
 **Example**
 
 ```bash
 yore eval --questions questions.jsonl --index docs/.index
+yore eval --questions questions.jsonl --index docs/.index --json --k 3,5,10
 ```
 
 ---

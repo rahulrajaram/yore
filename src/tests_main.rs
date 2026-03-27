@@ -1335,6 +1335,7 @@ fn test_eval_json_result_serialization() {
                 expected: vec!["auth.md".to_string()],
                 found: vec!["auth.md".to_string()],
                 missing: vec![],
+                ranking: None,
             },
             EvalQuestionResult {
                 question: "What is the API endpoint?".to_string(),
@@ -1342,8 +1343,15 @@ fn test_eval_json_result_serialization() {
                 expected: vec!["api.md".to_string()],
                 found: vec![],
                 missing: vec!["api.md".to_string()],
+                ranking: Some(RankingMetrics {
+                    precision_at_k: vec![MetricAtK { k: 5, value: 0.4 }],
+                    recall_at_k: vec![MetricAtK { k: 5, value: 1.0 }],
+                    mrr: 0.5,
+                    ndcg_at_k: vec![MetricAtK { k: 5, value: 0.8 }],
+                }),
             },
         ],
+        ranking_metrics: None,
     };
 
     let json = serde_json::to_string_pretty(&result).unwrap();
@@ -1355,6 +1363,176 @@ fn test_eval_json_result_serialization() {
     assert!(json.contains("\"results\""));
     assert!(json.contains("How do I authenticate?"));
     assert!(json.contains("\"missing\": []"));
+    // ranking is omitted when None
+    assert!(!json.contains("\"ranking\":\n") || json.contains("\"ranking\":"));
+    // ranking_metrics omitted at top level when None
+    assert!(!json.contains("\"ranking_metrics\""));
+    // The second question has ranking data
+    assert!(json.contains("\"mrr\": 0.5"));
+    assert!(json.contains("\"precision_at_k\""));
+}
+
+#[test]
+fn test_unique_doc_ranking() {
+    let sections = vec![
+        SectionMatch {
+            doc_path: "docs/a.md".to_string(),
+            heading: "H1".to_string(),
+            line_start: 1,
+            line_end: 10,
+            bm25_score: 5.0,
+            content: "content a".to_string(),
+            canonicality: 0.5,
+        },
+        SectionMatch {
+            doc_path: "docs/b.md".to_string(),
+            heading: "H2".to_string(),
+            line_start: 1,
+            line_end: 10,
+            bm25_score: 4.0,
+            content: "content b".to_string(),
+            canonicality: 0.5,
+        },
+        SectionMatch {
+            doc_path: "docs/a.md".to_string(),
+            heading: "H3".to_string(),
+            line_start: 11,
+            line_end: 20,
+            bm25_score: 3.0,
+            content: "content a2".to_string(),
+            canonicality: 0.5,
+        },
+        SectionMatch {
+            doc_path: "docs/c.md".to_string(),
+            heading: "H4".to_string(),
+            line_start: 1,
+            line_end: 10,
+            bm25_score: 2.0,
+            content: "content c".to_string(),
+            canonicality: 0.5,
+        },
+    ];
+    let ranking = unique_doc_ranking(&sections);
+    assert_eq!(ranking, vec!["docs/a.md", "docs/b.md", "docs/c.md"]);
+}
+
+#[test]
+fn test_precision_at_k() {
+    let ranked = vec![
+        "a.md".to_string(),
+        "b.md".to_string(),
+        "c.md".to_string(),
+        "d.md".to_string(),
+        "e.md".to_string(),
+    ];
+    let relevant: HashSet<String> = ["a.md", "c.md"].iter().map(|s| s.to_string()).collect();
+
+    assert_eq!(precision_at_k(&ranked, &relevant, 5), 0.4);
+    assert_eq!(precision_at_k(&ranked, &relevant, 1), 1.0);
+    assert_eq!(precision_at_k(&ranked, &relevant, 2), 0.5);
+    assert_eq!(precision_at_k(&ranked, &relevant, 0), 0.0);
+}
+
+#[test]
+fn test_recall_at_k() {
+    let ranked = vec!["a.md".to_string(), "b.md".to_string(), "c.md".to_string()];
+    let relevant: HashSet<String> = ["a.md", "c.md"].iter().map(|s| s.to_string()).collect();
+
+    assert_eq!(recall_at_k(&ranked, &relevant, 3), 1.0);
+    assert_eq!(recall_at_k(&ranked, &relevant, 1), 0.5);
+    assert_eq!(recall_at_k(&ranked, &relevant, 0), 0.0);
+
+    // Empty relevant set
+    let empty: HashSet<String> = HashSet::new();
+    assert_eq!(recall_at_k(&ranked, &empty, 3), 0.0);
+}
+
+#[test]
+fn test_reciprocal_rank() {
+    let ranked = vec!["a.md".to_string(), "b.md".to_string(), "c.md".to_string()];
+
+    // Relevant at rank 1
+    let rel1: HashSet<String> = ["a.md"].iter().map(|s| s.to_string()).collect();
+    assert_eq!(reciprocal_rank(&ranked, &rel1), 1.0);
+
+    // Relevant at rank 2
+    let rel2: HashSet<String> = ["b.md"].iter().map(|s| s.to_string()).collect();
+    assert_eq!(reciprocal_rank(&ranked, &rel2), 0.5);
+
+    // No match
+    let no_match: HashSet<String> = ["z.md"].iter().map(|s| s.to_string()).collect();
+    assert_eq!(reciprocal_rank(&ranked, &no_match), 0.0);
+}
+
+#[test]
+fn test_ndcg_at_k() {
+    // Perfect ranking: both relevant docs at positions 0 and 1
+    let perfect = vec!["a.md".to_string(), "b.md".to_string(), "c.md".to_string()];
+    let relevant: HashSet<String> = ["a.md", "b.md"].iter().map(|s| s.to_string()).collect();
+    assert_eq!(ndcg_at_k(&perfect, &relevant, 3), 1.0);
+
+    // Bad ranking: relevant docs at end
+    let bad = vec![
+        "c.md".to_string(),
+        "d.md".to_string(),
+        "a.md".to_string(),
+        "b.md".to_string(),
+    ];
+    let ndcg = ndcg_at_k(&bad, &relevant, 4);
+    assert!(ndcg < 1.0, "bad ranking should have nDCG < 1.0, got {ndcg}");
+    assert!(ndcg > 0.0, "bad ranking should have nDCG > 0.0, got {ndcg}");
+
+    // No relevant docs
+    let empty: HashSet<String> = HashSet::new();
+    assert_eq!(ndcg_at_k(&perfect, &empty, 3), 0.0);
+}
+
+#[test]
+fn test_compute_ranking_metrics() {
+    let ranked = vec![
+        "a.md".to_string(),
+        "b.md".to_string(),
+        "c.md".to_string(),
+        "d.md".to_string(),
+        "e.md".to_string(),
+    ];
+    let relevant: HashSet<String> = ["a.md", "c.md"].iter().map(|s| s.to_string()).collect();
+
+    let metrics = compute_ranking_metrics(&ranked, &relevant, &[3, 5]);
+    assert_eq!(metrics.precision_at_k.len(), 2);
+    assert_eq!(metrics.recall_at_k.len(), 2);
+    assert_eq!(metrics.ndcg_at_k.len(), 2);
+    assert_eq!(metrics.mrr, 1.0); // first relevant at rank 1
+
+    // P@3 = 2/3
+    assert!((metrics.precision_at_k[0].value - 2.0 / 3.0).abs() < 1e-9);
+    assert_eq!(metrics.precision_at_k[0].k, 3);
+
+    // P@5 = 2/5
+    assert!((metrics.precision_at_k[1].value - 0.4).abs() < 1e-9);
+}
+
+#[test]
+fn test_aggregate_ranking_metrics() {
+    let m1 = RankingMetrics {
+        precision_at_k: vec![MetricAtK { k: 5, value: 0.4 }],
+        recall_at_k: vec![MetricAtK { k: 5, value: 1.0 }],
+        mrr: 1.0,
+        ndcg_at_k: vec![MetricAtK { k: 5, value: 0.8 }],
+    };
+    let m2 = RankingMetrics {
+        precision_at_k: vec![MetricAtK { k: 5, value: 0.2 }],
+        recall_at_k: vec![MetricAtK { k: 5, value: 0.5 }],
+        mrr: 0.5,
+        ndcg_at_k: vec![MetricAtK { k: 5, value: 0.6 }],
+    };
+
+    let agg = aggregate_ranking_metrics(&[m1, m2], &[5]);
+    assert_eq!(agg.questions_with_relevance, 2);
+    assert!((agg.mean_mrr - 0.75).abs() < 1e-9);
+    assert!((agg.mean_precision_at_k[0].value - 0.3).abs() < 1e-9);
+    assert!((agg.mean_recall_at_k[0].value - 0.75).abs() < 1e-9);
+    assert!((agg.mean_ndcg_at_k[0].value - 0.7).abs() < 1e-9);
 }
 
 #[test]

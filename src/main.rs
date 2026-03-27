@@ -370,7 +370,8 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             questions,
             index,
             json,
-        } => cmd_eval(&questions, &index, json),
+            k,
+        } => cmd_eval(&questions, &index, json, &k),
         Commands::Vocabulary {
             index,
             limit,
