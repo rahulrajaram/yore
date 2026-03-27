@@ -2115,3 +2115,85 @@ fn test_build_mcp_handle_is_stable() {
     assert_eq!(left, right);
     assert!(left.starts_with("ctx_"));
 }
+
+#[test]
+fn test_compute_index_fingerprint_deterministic() {
+    let mut files = HashMap::new();
+    files.insert(
+        "docs/auth.md".to_string(),
+        FileEntry {
+            path: "docs/auth.md".to_string(),
+            size_bytes: 100,
+            line_count: 10,
+            headings: Vec::new(),
+            keywords: Vec::new(),
+            body_keywords: Vec::new(),
+            links: Vec::new(),
+            simhash: 0,
+            term_frequencies: HashMap::new(),
+            doc_length: 0,
+            minhash: Vec::new(),
+            section_fingerprints: Vec::new(),
+            adr_references: Vec::new(),
+        },
+    );
+
+    let index = ForwardIndex {
+        files,
+        indexed_at: "2026-03-26T00:00:00Z".to_string(),
+        version: 5,
+        source_root: String::new(),
+        avg_doc_length: 0.0,
+        idf_map: HashMap::new(),
+    };
+
+    let left = compute_index_fingerprint(&index);
+    let right = compute_index_fingerprint(&index);
+    assert_eq!(left, right);
+    assert!(left.starts_with("idx_"));
+    assert_eq!(left.len(), 20); // "idx_" + 16 hex chars
+}
+
+#[test]
+fn test_compute_index_fingerprint_changes_with_index() {
+    let make_index = |indexed_at: &str| {
+        let mut files = HashMap::new();
+        files.insert(
+            "docs/auth.md".to_string(),
+            FileEntry {
+                path: "docs/auth.md".to_string(),
+                size_bytes: 100,
+                line_count: 10,
+                headings: Vec::new(),
+                keywords: Vec::new(),
+                body_keywords: Vec::new(),
+                links: Vec::new(),
+                simhash: 0,
+                term_frequencies: HashMap::new(),
+                doc_length: 0,
+                minhash: Vec::new(),
+                section_fingerprints: Vec::new(),
+                adr_references: Vec::new(),
+            },
+        );
+        ForwardIndex {
+            files,
+            indexed_at: indexed_at.to_string(),
+            version: 5,
+            source_root: String::new(),
+            avg_doc_length: 0.0,
+            idf_map: HashMap::new(),
+        }
+    };
+
+    let fp1 = compute_index_fingerprint(&make_index("2026-03-26T00:00:00Z"));
+    let fp2 = compute_index_fingerprint(&make_index("2026-03-27T00:00:00Z"));
+    assert_ne!(fp1, fp2);
+}
+
+#[test]
+fn test_generate_trace_id_format() {
+    let id = generate_trace_id("test-seed");
+    assert!(id.starts_with("trc_"));
+    assert_eq!(id.len(), 20); // "trc_" + 16 hex chars
+}

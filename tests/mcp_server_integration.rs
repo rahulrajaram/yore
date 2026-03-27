@@ -220,6 +220,19 @@ fn test_mcp_serve_lists_tools_and_supports_search_then_fetch() {
         .as_str()
         .unwrap()
         .contains("\"tool\":\"search_context\""));
+
+    // Verify trace in search response
+    let search_trace = &search_payload["trace"];
+    assert!(search_trace["trace_id"]
+        .as_str()
+        .unwrap()
+        .starts_with("trc_"));
+    assert!(search_trace["index_fingerprint"]
+        .as_str()
+        .unwrap()
+        .starts_with("idx_"));
+    assert_eq!(search_trace["strategy"], "lexical");
+
     let handle = search_payload["results"][0]["handle"]
         .as_str()
         .unwrap()
@@ -244,6 +257,21 @@ fn test_mcp_serve_lists_tools_and_supports_search_then_fetch() {
         .as_str()
         .unwrap()
         .contains("[truncated]"));
+
+    // Verify trace in fetch response
+    let fetch_trace = &fetch_payload["trace"];
+    assert!(fetch_trace["trace_id"]
+        .as_str()
+        .unwrap()
+        .starts_with("trc_"));
+    assert_eq!(fetch_trace["strategy"], "artifact_fetch");
+    let fetch_expansion: Vec<&str> = fetch_trace["expansion_path"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|v| v.as_str())
+        .collect();
+    assert!(fetch_expansion.contains(&"budget_truncate"));
 }
 
 #[cfg(unix)]
