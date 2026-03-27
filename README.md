@@ -424,6 +424,7 @@ yore assemble <query> --index <index-dir>
 * `--format, -f` – Output format (`markdown` is the default)
 * `--doc-terms` – Show top N distinctive terms per source document (0 disables)
 * `--from-files` – Assemble from explicit files instead of a query (supports `@list.txt`)
+* `--use-relations` – Use the persisted relation graph (`relations.json`) for cross‑reference expansion instead of on‑the‑fly link scanning
 
 **Example**
 
@@ -435,7 +436,9 @@ yore assemble "How does the authentication system work?" \
 
 # Assemble from explicit files
 yore assemble --from-files docs/adr/ADR-0010.md docs/adr/ADR-0011.md --index docs/.index
-yore assemble --from-files @file-list.txt --index docs/.index
+
+# Use relation graph for smarter cross-reference expansion
+yore assemble "deployment process" --use-relations --index docs/.index
 ```
 
 ---
@@ -1155,6 +1158,61 @@ yore policy --config <file> --index <index-dir>
 
 ```bash
 yore policy --config .yore-policy.yaml --index docs/.index --json
+```
+
+### 7.25 `yore health`
+
+Detect structural document‑health issues from build‑time metrics.
+
+```bash
+yore health [FILE] --index <index-dir>
+yore health --all --index <index-dir>
+```
+
+Uses persisted document and section metrics emitted by `yore build` to flag oversized docs, accumulator‑style section growth, stale completed sections, and changelog sprawl.
+
+**Key options**
+
+* `FILE` – Specific file to inspect (omit for `--all`)
+* `--all` – Evaluate every indexed document
+* `--max-lines` – Line count threshold for bloated files (default: 500)
+* `--max-part-sections` – Maximum "Part N" headings before accumulator risk (default: 8)
+* `--max-completed-lines` – Maximum retained lines in completion‑marked sections (default: 50)
+* `--max-changelog-entries` – Maximum changelog list items (default: 15)
+* `--json` – Emit JSON output
+
+**Examples**
+
+```bash
+yore health docs/plan.md --index .yore
+yore health --all --index .yore --json
+```
+
+---
+
+### 7.26 `yore paths`
+
+Show relation paths between documents via the persisted relation graph.
+
+```bash
+yore paths <source> --index <index-dir>
+```
+
+Displays how a source document connects to other documents through links, section links, and ADR references. Requires `relations.json` from `yore build`.
+
+**Key options**
+
+* `<SOURCE>` – Source file to show paths from
+* `--depth, -d` – Traversal depth (1 = direct edges, 2 = two hops; default: 1)
+* `--kind` – Filter by edge kind: `links_to`, `section_links_to`, `adr_reference`
+* `--json` – Emit JSON output
+
+**Examples**
+
+```bash
+yore paths docs/architecture.md --index .yore
+yore paths docs/architecture.md --depth 2 --json --index .yore
+yore paths docs/architecture.md --kind links_to --index .yore
 ```
 
 ---

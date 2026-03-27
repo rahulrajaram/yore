@@ -11,6 +11,27 @@
   `--depth`, `--kind` filter, and `--json` output.
 - Add `--use-relations` flag to `assemble` for graph-aware
   cross-reference expansion from persisted relation edges.
+- Add ranked retrieval metrics to `yore eval`: precision@k, recall@k,
+  MRR, and nDCG@k over initial BM25 retrieval ranking.
+- Add `--k` flag to `eval` for configurable k values (default: 5,10).
+- Add `relevant_docs` field to eval JSONL format for per-question
+  relevance judgments (backward compatible).
+- Fix `found`/`missing` in eval JSON output to match against the
+  assembled digest instead of the query text.
+
+## 0.6.0
+- Add `query` field to each result object in `--json` output so callers
+  can correlate results with the query that produced them.
+- Add `query` field to the top-level `--explain --json` wrapper alongside
+  `results` and `diagnostics`.
+
+## 0.5.0
+- Add bounded MCP retrieval flow with `yore mcp search-context` and
+  `yore mcp fetch-context` for preview-first, explicit expansion.
+- Add `yore mcp serve` to expose the bounded contract over MCP stdio
+  for editor and agent clients.
+- Harden MCP behavior with cwd-independent source resolution, read-only-safe
+  handle storage fallback, and explicit truncation metadata.
 
 ## 0.4.0
 - Add missing command coverage in the help and README command reference (`similar`, `diff`, `stats`, `repl`, `policy`) for full CLI parity.
