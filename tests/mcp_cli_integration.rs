@@ -114,6 +114,31 @@ fn test_mcp_search_context_returns_handles_and_dedupes_duplicates() {
         .as_str()
         .unwrap()
         .contains("Authentication"));
+
+    // Verify trace metadata
+    let trace = &value["trace"];
+    assert!(
+        trace["trace_id"].as_str().unwrap().starts_with("trc_"),
+        "trace_id should start with trc_"
+    );
+    assert!(
+        trace["index_fingerprint"]
+            .as_str()
+            .unwrap()
+            .starts_with("idx_"),
+        "index_fingerprint should start with idx_"
+    );
+    assert_eq!(trace["strategy"], "lexical");
+    let expansion_path: Vec<&str> = trace["expansion_path"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|v| v.as_str())
+        .collect();
+    assert!(
+        expansion_path.contains(&"bm25_search"),
+        "expansion_path should contain bm25_search"
+    );
 }
 
 #[test]
@@ -167,6 +192,18 @@ fn test_mcp_fetch_context_expands_handle_with_truncation_metadata() {
         .as_str()
         .unwrap()
         .contains("[truncated]"));
+
+    // Verify trace metadata
+    let trace = &value["trace"];
+    assert!(trace["trace_id"].as_str().unwrap().starts_with("trc_"));
+    assert_eq!(trace["strategy"], "artifact_fetch");
+    let expansion_path: Vec<&str> = trace["expansion_path"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|v| v.as_str())
+        .collect();
+    assert!(expansion_path.contains(&"budget_truncate"));
 }
 
 #[test]

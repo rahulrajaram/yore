@@ -42,6 +42,9 @@ cp -R "$fixture_dir/docs" "$tmpdir/docs"
   printf '%s\n' "$search_json" | grep -q '"selection_mode": "query"'
   printf '%s\n' "$search_json" | grep -q '"source": {'
   printf '%s\n' "$search_json" | grep -q '"preview": "'
+  printf '%s\n' "$search_json" | grep -q '"trace_id": "trc_'
+  printf '%s\n' "$search_json" | grep -q '"index_fingerprint": "idx_'
+  printf '%s\n' "$search_json" | grep -q '"strategy": "lexical"'
 
   handle="$(printf '%s\n' "$search_json" | sed -n 's/.*"handle": "\(ctx_[^"]*\)".*/\1/p' | head -n1)"
   if [ -z "$handle" ]; then
@@ -60,4 +63,5 @@ cp -R "$fixture_dir/docs" "$tmpdir/docs"
   printf '%s\n' "$fetch_json" | grep -q "\"handle\": \"$handle\""
   printf '%s\n' "$fetch_json" | grep -q '"truncated": true'
   printf '%s\n' "$fetch_json" | grep -q '\[truncated\]'
+  printf '%s\n' "$fetch_json" | grep -q '"strategy": "artifact_fetch"'
 )

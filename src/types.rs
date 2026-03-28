@@ -203,6 +203,14 @@ pub struct McpPressure {
     pub reasons: Vec<String>,
 }
 
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct McpTrace {
+    pub trace_id: String,
+    pub index_fingerprint: String,
+    pub strategy: String,
+    pub expansion_path: Vec<String>,
+}
+
 #[derive(Serialize, Debug, Default)]
 pub struct McpSearchBudget {
     pub max_results: usize,
@@ -256,6 +264,7 @@ pub struct McpSearchResponse {
     pub selection_mode: String,
     pub budget: McpSearchBudget,
     pub pressure: McpPressure,
+    pub trace: McpTrace,
     pub results: Vec<McpSearchResult>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
@@ -272,6 +281,7 @@ pub struct McpFetchResponse {
     pub handle: String,
     pub budget: McpFetchBudget,
     pub pressure: McpPressure,
+    pub trace: McpTrace,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub query: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -292,6 +302,8 @@ pub struct McpArtifact {
     pub preview: String,
     pub content: String,
     pub created_at: String,
+    #[serde(default)]
+    pub index_fingerprint: String,
 }
 
 #[derive(Debug, Clone, Copy)]

@@ -70,6 +70,30 @@ pub(crate) fn build_mcp_source_ref(section: &SectionMatch) -> McpSourceRef {
     }
 }
 
+pub(crate) fn compute_index_fingerprint(index: &ForwardIndex) -> String {
+    const FNV_OFFSET_BASIS: u64 = 14_695_981_039_346_656_037;
+    let mut state = FNV_OFFSET_BASIS;
+    stable_mcp_hash_update(&mut state, index.indexed_at.as_bytes());
+    stable_mcp_hash_update(&mut state, &[0xff]);
+    stable_mcp_hash_update(&mut state, &index.version.to_le_bytes());
+    stable_mcp_hash_update(&mut state, &[0xff]);
+    stable_mcp_hash_update(&mut state, &index.files.len().to_le_bytes());
+    format!("idx_{state:016x}")
+}
+
+pub(crate) fn generate_trace_id(seed: &str) -> String {
+    const FNV_OFFSET_BASIS: u64 = 14_695_981_039_346_656_037;
+    let mut state = FNV_OFFSET_BASIS;
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    stable_mcp_hash_update(&mut state, &nanos.to_le_bytes());
+    stable_mcp_hash_update(&mut state, &[0xff]);
+    stable_mcp_hash_update(&mut state, seed.as_bytes());
+    format!("trc_{state:016x}")
+}
+
 pub(crate) fn store_mcp_artifact(
     index_dir: &Path,
     artifact: &McpArtifact,
@@ -129,6 +153,8 @@ pub(crate) fn build_mcp_search_response(
     options: McpSearchOptions,
 ) -> Result<McpSearchResponse, Box<dyn std::error::Error>> {
     let forward_index = load_forward_index(index_dir)?;
+    let fingerprint = compute_index_fingerprint(&forward_index);
+    let trace_id = generate_trace_id(query);
     let selection_mode = if from_files.is_empty() {
         "query".to_string()
     } else {
@@ -187,6 +213,12 @@ pub(crate) fn build_mcp_search_response(
                     ..McpSearchBudget::default()
                 },
                 pressure: McpPressure::default(),
+                trace: McpTrace {
+                    trace_id,
+                    index_fingerprint: fingerprint,
+                    strategy: "lexical".to_string(),
+                    expansion_path: vec!["bm25_search".to_string()],
+                },
                 results: Vec::new(),
                 error,
                 message,
@@ -274,6 +306,7 @@ pub(crate) fn build_mcp_search_response(
             preview: preview.clone(),
             content: raw_section.content.clone(),
             created_at: chrono_now(),
+            index_fingerprint: fingerprint.clone(),
         };
         if let Err(err) = store_mcp_artifact(index_dir, &artifact) {
             return Ok(McpSearchResponse {
@@ -288,6 +321,12 @@ pub(crate) fn build_mcp_search_response(
                     ..budget
                 },
                 pressure,
+                trace: McpTrace {
+                    trace_id: trace_id.clone(),
+                    index_fingerprint: fingerprint.clone(),
+                    strategy: "lexical".to_string(),
+                    expansion_path: vec!["bm25_search".to_string()],
+                },
                 results,
                 error: Some("artifact_store_unavailable".to_string()),
                 message: Some(format!(
@@ -325,6 +364,15 @@ pub(crate) fn build_mcp_search_response(
     pressure.reasons.sort();
     pressure.reasons.dedup();
 
+    let mut expansion_path = vec!["bm25_search".to_string()];
+    if deduped_hits > 0 {
+        expansion_path.push("dedup".to_string());
+    }
+    expansion_path.push("extractive_refine".to_string());
+    if pressure.truncated {
+        expansion_path.push("budget_truncate".to_string());
+    }
+
     Ok(McpSearchResponse {
         schema_version: MCP_SCHEMA_VERSION,
         tool: "search_context".to_string(),
@@ -332,6 +380,12 @@ pub(crate) fn build_mcp_search_response(
         selection_mode,
         budget,
         pressure,
+        trace: McpTrace {
+            trace_id,
+            index_fingerprint: fingerprint,
+            strategy: "lexical".to_string(),
+            expansion_path,
+        },
         results,
         error: None,
         message: None,
@@ -355,6 +409,8 @@ pub(crate) fn build_mcp_fetch_response(
     index_dir: &Path,
     options: McpFetchOptions,
 ) -> Result<McpFetchResponse, Box<dyn std::error::Error>> {
+    let trace_id = generate_trace_id(handle);
+
     let Ok(artifact) = load_mcp_artifact(index_dir, handle) else {
         return Ok(McpFetchResponse {
             schema_version: MCP_SCHEMA_VERSION,
@@ -366,6 +422,12 @@ pub(crate) fn build_mcp_fetch_response(
                 ..McpFetchBudget::default()
             },
             pressure: McpPressure::default(),
+            trace: McpTrace {
+                trace_id,
+                index_fingerprint: String::new(),
+                strategy: "artifact_fetch".to_string(),
+                expansion_path: vec!["artifact_load".to_string()],
+            },
             query: None,
             result: None,
             error: Some("unknown_handle".to_string()),
@@ -380,6 +442,11 @@ pub(crate) fn build_mcp_fetch_response(
     let content_tokens = estimate_tokens(&content);
     let content_bytes = content.len();
 
+    let mut expansion_path = vec!["artifact_load".to_string()];
+    if truncated {
+        expansion_path.push("budget_truncate".to_string());
+    }
+
     Ok(McpFetchResponse {
         schema_version: MCP_SCHEMA_VERSION,
         tool: "fetch_context".to_string(),
@@ -393,6 +460,12 @@ pub(crate) fn build_mcp_fetch_response(
         pressure: McpPressure {
             truncated,
             reasons: truncation_reasons,
+        },
+        trace: McpTrace {
+            trace_id,
+            index_fingerprint: artifact.index_fingerprint,
+            strategy: "artifact_fetch".to_string(),
+            expansion_path,
         },
         query: Some(artifact.query),
         result: Some(McpFetchResult {
