@@ -1171,7 +1171,7 @@ pub(crate) fn cmd_dupes_sections(
 
     // Sort clusters by number of files (descending)
     let mut sorted_clusters = duplicate_clusters;
-    sorted_clusters.sort_by(|a, b| b.files.len().cmp(&a.files.len()));
+    sorted_clusters.sort_by_key(|a| std::cmp::Reverse(a.files.len()));
 
     if json {
         let output: Vec<_> = sorted_clusters

@@ -32,14 +32,13 @@ pub fn cmd_build(
     // Parse file types
     let extensions: HashSet<String> = types.split(',').map(|s| s.trim().to_lowercase()).collect();
 
-    // Build walker with ignore patterns
+    // Build walker with ignore patterns. Note: `--exclude` patterns are NOT
+    // passed to the walker (the `ignore` crate's `add_ignore` expects an ignore
+    // file path, not an inline pattern), so they are applied as substring
+    // filters on each indexed path below — matching the existing
+    // node_modules/target/venv skip block.
     let mut builder = WalkBuilder::new(path);
     builder.hidden(true).git_ignore(true).git_global(true);
-
-    // Add custom excludes
-    for pattern in exclude {
-        builder.add_ignore(Path::new(pattern));
-    }
 
     // Collect files
     let mut forward_index = ForwardIndex {
@@ -105,6 +104,15 @@ pub fn cmd_build(
             || path_str.contains("vendor/")
             || path_str.contains("venv/")
             || path_str.contains("__pycache__")
+        {
+            continue;
+        }
+
+        // Skip paths that match any `--exclude` pattern (substring match,
+        // consistent with the orphan/audit `--exclude` handling).
+        if exclude
+            .iter()
+            .any(|pattern| path_str.contains(pattern.as_str()))
         {
             continue;
         }

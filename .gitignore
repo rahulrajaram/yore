@@ -6,11 +6,6 @@ Cargo.lock
 .yore/
 .yore-test/
 
-# YARLI runtime state and workspaces
-.yarli/
-.yarl/
-.yarl/workspaces/
-
 # Local planning artifacts
 IMPLEMENTATION_PLAN.md
 PROMPT.md

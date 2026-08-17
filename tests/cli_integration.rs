@@ -741,6 +741,81 @@ fn test_build_json_output() {
     assert!(v["total_relations"].as_u64().is_some());
 }
 
+// ── build --exclude ────────────────────────────────────────────────
+
+#[test]
+fn test_build_exclude_omits_archived_docs() {
+    let root = temp_dir("build-exclude");
+    let docs = root.join("docs");
+    let archive = docs.join("archive");
+    fs::create_dir_all(&archive).unwrap();
+
+    // A live doc and an archived doc (both markdown).
+    fs::write(
+        docs.join("live.md"),
+        "\
+# Live Doc
+
+Active documentation.",
+    )
+    .unwrap();
+    fs::write(
+        archive.join("archived.md"),
+        "\
+# Archived Doc
+
+This archived plan must stay out of results.",
+    )
+    .unwrap();
+
+    let index = root.join(".yore");
+    build_index(&root, "docs", &index);
+
+    // Without --exclude, the archived doc is indexed.
+    let without = fs::read_to_string(index.join("forward_index.json")).unwrap();
+    let v_without: Value = serde_json::from_str(&without).unwrap();
+    let files_without: Vec<String> = v_without["files"]
+        .as_object()
+        .unwrap()
+        .keys()
+        .cloned()
+        .collect();
+    assert!(
+        files_without.iter().any(|f| f.contains("archive"))
+            && files_without.iter().any(|f| f.contains("live")),
+        "expected both live and archived docs when no --exclude, got {files_without:?}"
+    );
+
+    // Rebuild with --exclude archive; the archived doc must be absent.
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_yore"));
+    cmd.current_dir(&root)
+        .args(["build", "docs", "--exclude", "archive", "--output"])
+        .arg(&index);
+    let output = cmd.output().expect("build --exclude failed");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        output.status.success(),
+        "build --exclude archived failed: {stdout}"
+    );
+
+    let with = fs::read_to_string(index.join("forward_index.json")).unwrap();
+    let v_with: Value = serde_json::from_str(&with).unwrap();
+    let files_with: Vec<String> = v_with["files"]
+        .as_object()
+        .unwrap()
+        .keys()
+        .cloned()
+        .collect();
+    assert!(
+        files_with.iter().any(|f| f.contains("live")),
+        "expected live doc to remain indexed, got {files_with:?}"
+    );
+    assert!(
+        !files_with.iter().any(|f| f.contains("archive")),
+        "--exclude archive failed to exclude archived docs, got {files_with:?}"
+    );
+}
+
 // ── policy ──────────────────────────────────────────────────────────
 
 #[test]

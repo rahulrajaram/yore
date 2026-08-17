@@ -19,7 +19,6 @@ details. Also adds reporting for canonical documents that lack inbound links.
 
 **Status:** Implemented
 **Priority:** High
-**Source:** [striation_customer_platform agents/reports/platform-documentation-steward/2026-01-01_yore-structural-analysis-proposal.md](https://github.com/anthropics/striation_customer_platform)
 
 ### Problem
 
@@ -201,13 +200,13 @@ $ yore structure --audit agents/reports/
 Report Structure Audit
 ======================
 
-platform-documentation-steward/ (8 reports)
+platform-docs/ (8 reports)
   ✓ All have Executive Summary
   ✓ All have metadata headers
   ⚠ 2 reports missing "Next Steps"
   ✗ 1 report has 16 H2 sections (sprawl risk)
 
-platform-developer/ (2 reports)
+guides/ (2 reports)
   ✓ Consistent structure
 
 Recommended actions:

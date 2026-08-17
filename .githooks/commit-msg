@@ -78,7 +78,7 @@ if printf '%s' "$subject" | grep -qE '^Revert '; then
   exit 0
 fi
 
-export COMMITHOOKS_CC_TYPES="${COMMITHOOKS_CC_TYPES:-feat,fix,docs,style,refactor,test,chore,perf,ci,build,revert,yarli,handoff}"
+export COMMITHOOKS_CC_TYPES="${COMMITHOOKS_CC_TYPES:-feat,fix,docs,style,refactor,test,chore,perf,ci,build,revert}"
 
 commithooks_validate_conventional_commit "$msg_file"
 commithooks_validate_subject_line "$msg_file"
