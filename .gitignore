@@ -6,15 +6,11 @@ Cargo.lock
 .yore/
 .yore-test/
 
-# YARLI runtime state and workspaces
-.yarli/
-.yarl/
-.yarl/workspaces/
-
 # Local planning artifacts
 IMPLEMENTATION_PLAN.md
 PROMPT.md
 PROMPT_YORE_ENHANCEMENTS.md
+NEXT_SHELL_PROMPT.md
 
 # Editor files
 *.swp

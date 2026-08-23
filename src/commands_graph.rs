@@ -437,7 +437,7 @@ pub(crate) fn run_stale_check(
         }
     }
 
-    files.sort_by(|a, b| b.days_since_modified.cmp(&a.days_since_modified));
+    files.sort_by_key(|a| std::cmp::Reverse(a.days_since_modified));
 
     Ok(StaleResult {
         total_stale: files.len(),

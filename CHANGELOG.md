@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.8.1
+- Fix `yore build --exclude` so patterns are actually applied to exclude
+  files from the index. The previous implementation fed each pattern to the
+  ignore crate's `add_ignore()`, which expects an ignore file path rather
+  than an inline pattern, so nothing was excluded.
+- Update all dependencies via `cargo update` (with a toolchain bump to Rust
+  1.97 for crates requiring a newer compiler) and modernize for clippy 1.97.
+- Add an integration test asserting an `archive/` directory is absent from
+  the forward index when `--exclude` is used.
+
 ## 0.8.0
 - Add deterministic relation extraction at build time (`relations.json`).
 - Emit three edge types: `links_to`, `section_links_to`, `adr_reference`.

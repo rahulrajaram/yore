@@ -24,7 +24,7 @@ pub(crate) fn cmd_stats(
         .iter()
         .map(|(k, v)| (k.clone(), v.len()))
         .collect();
-    keyword_counts.sort_by(|a, b| b.1.cmp(&a.1));
+    keyword_counts.sort_by_key(|a| std::cmp::Reverse(a.1));
 
     let total_headings: usize = forward_index.files.values().map(|e| e.headings.len()).sum();
     let total_links: usize = forward_index.files.values().map(|e| e.links.len()).sum();

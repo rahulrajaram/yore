@@ -694,10 +694,7 @@ pub(crate) fn cmd_mcp_serve(index_dir: &Path) -> Result<(), Box<dyn std::error::
     let mut reader = stdin.lock();
     let mut writer = stdout.lock();
 
-    loop {
-        let Some(message) = read_mcp_stdio_message(&mut reader)? else {
-            break;
-        };
+    while let Some(message) = read_mcp_stdio_message(&mut reader)? {
         let request: JsonRpcRequest = match serde_json::from_value(message) {
             Ok(request) => request,
             Err(err) => {
